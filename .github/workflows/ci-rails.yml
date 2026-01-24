@@ -2,6 +2,12 @@ name: CI Rails
 
 on:
   workflow_call:
+    inputs:
+      elasticsearch:
+        description: 'Enable Elasticsearch service for tests'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   scan_ruby:
@@ -78,7 +84,9 @@ jobs:
       - name: Lint code for consistent style
         run: bin/rubocop -f github
 
+  # Test job without Elasticsearch (default)
   test:
+    if: ${{ inputs.elasticsearch == false }}
     runs-on: ubuntu-latest
 
     env:
@@ -106,6 +114,88 @@ jobs:
       - name: Read .tool-versions
         uses: marocchino/tool-versions-action@v1
         id: versions
+
+      - name: Install ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+          ruby-version: ${{ steps.versions.outputs.ruby }}
+
+      - name: Install ruby gems
+        run: bundle install
+
+      - name: Install node
+        uses: actions/setup-node@v6
+        with:
+          cache: "yarn"
+          node-version: ${{ steps.versions.outputs.nodejs }}
+
+      - name: Install node packages
+        run: yarn install
+
+      - name: Setup database
+        run: bin/rails db:create db:schema:load
+
+      - name: Prepare test environment
+        run: bin/rails spec:prepare css:build
+
+      - name: Run tests
+        run: bundle exec rspec --format RSpec::Github::Formatter --format progress
+
+  # Test job with Elasticsearch
+  test_with_elasticsearch:
+    if: ${{ inputs.elasticsearch == true }}
+    runs-on: ubuntu-latest
+
+    env:
+      RAILS_ENV: test
+      ELASTICSEARCH_URL: http://localhost:9200
+
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read .tool-versions
+        uses: marocchino/tool-versions-action@v1
+        id: versions
+
+      - name: Configure sysctl limits for Elasticsearch
+        run: |
+          sudo swapoff -a
+          sudo sysctl -w vm.swappiness=1
+          sudo sysctl -w fs.file-max=262144
+          sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start Elasticsearch
+        uses: elastic/elastic-github-actions/elasticsearch@master
+        with:
+          stack-version: ${{ steps.versions.outputs.elasticsearch }}
+          security-enabled: false
+
+      - name: Wait for Elasticsearch
+        run: |
+          echo "Waiting for Elasticsearch to be ready..."
+          until curl -s http://localhost:9200/_cluster/health | grep -q '"status":"green"\|"status":"yellow"'; do
+            echo "Elasticsearch not ready yet, waiting..."
+            sleep 5
+          done
+          echo "Elasticsearch is ready!"
+          curl -s http://localhost:9200
 
       - name: Install ruby
         uses: ruby/setup-ruby@v1

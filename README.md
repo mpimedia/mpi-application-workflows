@@ -15,6 +15,18 @@ Full CI pipeline for Rails applications including:
 - JavaScript security scanning (Importmap Audit)
 - Linting (RuboCop)
 - Test suite (RSpec with PostgreSQL)
+- Optional Elasticsearch support
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `elasticsearch` | boolean | `false` | Enable Elasticsearch service for tests |
+
+When `elasticsearch: true`, the workflow:
+- Reads the Elasticsearch version from `.tool-versions`
+- Starts Elasticsearch before running tests
+- Sets `ELASTICSEARCH_URL` environment variable
 
 ### update-gems.yml
 
@@ -38,7 +50,9 @@ Migration index checking:
 
 ## Usage
 
-### CI Pipeline
+### CI Pipeline (Standard)
+
+For projects without Elasticsearch:
 
 ```yaml
 # .github/workflows/ci.yml
@@ -53,6 +67,32 @@ jobs:
   ci:
     uses: mpimedia/mpi-application-workflows/.github/workflows/ci-rails.yml@main
     secrets: inherit
+```
+
+### CI Pipeline (With Elasticsearch)
+
+For projects that need Elasticsearch:
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  ci:
+    uses: mpimedia/mpi-application-workflows/.github/workflows/ci-rails.yml@main
+    with:
+      elasticsearch: true
+    secrets: inherit
+```
+
+**Note:** The Elasticsearch version is read from your project's `.tool-versions` file:
+```
+elasticsearch 9.2.4
 ```
 
 ### Gem Updates
