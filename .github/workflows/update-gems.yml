@@ -1,0 +1,24 @@
+name: Update Gems
+
+on:
+  workflow_call:
+
+jobs:
+  update-gems:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Run update script
+        run: |
+          chmod +x bin/update-gems
+          bin/update-gems
