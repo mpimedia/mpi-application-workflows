@@ -23,6 +23,11 @@ on:
         required: false
         default: true
         type: boolean
+      importmap:
+        description: 'Run importmap audit (disable for projects using esbuild/webpack)'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   scan_ruby:
@@ -50,7 +55,7 @@ jobs:
         run: bin/bundler-audit
 
   scan_js:
-    if: ${{ inputs.security_scan == true }}
+    if: ${{ inputs.security_scan == true && inputs.importmap == true }}
     runs-on: ubuntu-latest
 
     steps:
