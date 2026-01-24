@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      libvips:
+        description: 'Install libvips for image processing'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   scan_ruby:
@@ -115,6 +120,10 @@ jobs:
         uses: marocchino/tool-versions-action@v1
         id: versions
 
+      - name: Install libvips
+        if: ${{ inputs.libvips == true }}
+        run: sudo apt-get update && sudo apt-get install -y libvips42
+
       - name: Install ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -174,28 +183,14 @@ jobs:
         uses: marocchino/tool-versions-action@v1
         id: versions
 
-      - name: Configure sysctl limits for Elasticsearch
-        run: |
-          sudo swapoff -a
-          sudo sysctl -w vm.swappiness=1
-          sudo sysctl -w fs.file-max=262144
-          sudo sysctl -w vm.max_map_count=262144
-
-      - name: Start Elasticsearch
-        uses: elastic/elastic-github-actions/elasticsearch@master
+      - name: Install Elasticsearch
+        uses: ankane/setup-elasticsearch@v1
         with:
-          stack-version: ${{ steps.versions.outputs.elasticsearch }}
-          security-enabled: false
+          elasticsearch-version: ${{ steps.versions.outputs.elasticsearch }}
 
-      - name: Wait for Elasticsearch
-        run: |
-          echo "Waiting for Elasticsearch to be ready..."
-          until curl -s http://localhost:9200/_cluster/health | grep -q '"status":"green"\|"status":"yellow"'; do
-            echo "Elasticsearch not ready yet, waiting..."
-            sleep 5
-          done
-          echo "Elasticsearch is ready!"
-          curl -s http://localhost:9200
+      - name: Install libvips
+        if: ${{ inputs.libvips == true }}
+        run: sudo apt-get update && sudo apt-get install -y libvips42
 
       - name: Install ruby
         uses: ruby/setup-ruby@v1
