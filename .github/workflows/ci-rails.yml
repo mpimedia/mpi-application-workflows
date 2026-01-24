@@ -13,9 +13,20 @@ on:
         required: false
         default: false
         type: boolean
+      security_scan:
+        description: 'Run security scans (Brakeman, bundler-audit, importmap audit)'
+        required: false
+        default: true
+        type: boolean
+      lint:
+        description: 'Run RuboCop linting'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   scan_ruby:
+    if: ${{ inputs.security_scan == true }}
     runs-on: ubuntu-latest
 
     steps:
@@ -39,6 +50,7 @@ jobs:
         run: bin/bundler-audit
 
   scan_js:
+    if: ${{ inputs.security_scan == true }}
     runs-on: ubuntu-latest
 
     steps:
@@ -59,6 +71,7 @@ jobs:
         run: bin/importmap audit
 
   lint:
+    if: ${{ inputs.lint == true }}
     runs-on: ubuntu-latest
     env:
       RUBOCOP_CACHE_ROOT: tmp/rubocop
