@@ -28,6 +28,11 @@ on:
         required: false
         default: true
         type: boolean
+      rspec_options:
+        description: 'Additional options passed to the rspec command (e.g. --exclude-pattern or path filters)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   scan_ruby:
@@ -167,7 +172,7 @@ jobs:
         run: bin/rails spec:prepare css:build
 
       - name: Run tests
-        run: bundle exec rspec --format RSpec::Github::Formatter --format progress
+        run: bundle exec rspec --format RSpec::Github::Formatter --format progress ${{ inputs.rspec_options }}
 
   # Test job with Elasticsearch
   test_with_elasticsearch:
@@ -235,4 +240,4 @@ jobs:
         run: bin/rails spec:prepare css:build
 
       - name: Run tests
-        run: bundle exec rspec --format RSpec::Github::Formatter --format progress
+        run: bundle exec rspec --format RSpec::Github::Formatter --format progress ${{ inputs.rspec_options }}
