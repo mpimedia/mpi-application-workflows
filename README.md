@@ -12,7 +12,7 @@ This repository contains reusable GitHub Actions workflows used across all MPI M
 
 Full CI pipeline for Rails applications including:
 - Ruby security scanning (Brakeman, Bundler Audit)
-- JavaScript security scanning (Importmap Audit)
+- JavaScript security scanning (Importmap Audit or Yarn Audit)
 - Linting (RuboCop)
 - Test suite (RSpec with PostgreSQL)
 - Optional Elasticsearch support
@@ -22,6 +22,12 @@ Full CI pipeline for Rails applications including:
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `elasticsearch` | boolean | `false` | Enable Elasticsearch service for tests |
+| `libvips` | boolean | `false` | Install libvips for image processing |
+| `security_scan` | boolean | `true` | Run security scans (Brakeman, bundler-audit, JS audit) |
+| `lint` | boolean | `true` | Run RuboCop linting |
+| `importmap` | boolean | `true` | Run importmap audit for projects using importmap-rails |
+| `jsbundling` | boolean | `false` | Run yarn npm audit for projects using jsbundling-rails (esbuild/webpack) |
+| `rspec_options` | string | `''` | Additional options passed to the rspec command |
 
 When `elasticsearch: true`, the workflow:
 - Reads the Elasticsearch version from `.tool-versions`
@@ -93,6 +99,28 @@ jobs:
 **Note:** The Elasticsearch version is read from your project's `.tool-versions` file:
 ```
 elasticsearch 9.2.4
+```
+
+### CI Pipeline (With jsbundling)
+
+For projects using esbuild or webpack via jsbundling-rails:
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  ci:
+    uses: mpimedia/mpi-application-workflows/.github/workflows/ci-rails.yml@main
+    with:
+      importmap: false
+      jsbundling: true
+    secrets: inherit
 ```
 
 ### Gem Updates
