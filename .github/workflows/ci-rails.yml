@@ -14,7 +14,7 @@ on:
         default: false
         type: boolean
       security_scan:
-        description: 'Run security scans (Brakeman, bundler-audit, importmap audit)'
+        description: 'Run security scans (Brakeman, bundler-audit, JS audit)'
         required: false
         default: true
         type: boolean
@@ -24,9 +24,14 @@ on:
         default: true
         type: boolean
       importmap:
-        description: 'Run importmap audit (disable for projects using esbuild/webpack)'
+        description: 'Run importmap audit for projects using importmap-rails'
         required: false
         default: true
+        type: boolean
+      jsbundling:
+        description: 'Run yarn npm audit for projects using jsbundling-rails (esbuild/webpack)'
+        required: false
+        default: false
         type: boolean
       rspec_options:
         description: 'Additional options passed to the rspec command (e.g. --exclude-pattern or path filters)'
@@ -59,7 +64,7 @@ jobs:
       - name: Scan for known security vulnerabilities in gems used
         run: bin/bundler-audit
 
-  scan_js:
+  scan_js_importmap:
     if: ${{ inputs.security_scan == true && inputs.importmap == true }}
     runs-on: ubuntu-latest
 
@@ -79,6 +84,30 @@ jobs:
 
       - name: Scan for security vulnerabilities in JavaScript dependencies
         run: bin/importmap audit
+
+  scan_js_jsbundling:
+    if: ${{ inputs.security_scan == true && inputs.jsbundling == true }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read .tool-versions
+        uses: marocchino/tool-versions-action@v1
+        id: versions
+
+      - name: Install node
+        uses: actions/setup-node@v6
+        with:
+          cache: "yarn"
+          node-version: ${{ steps.versions.outputs.nodejs }}
+
+      - name: Install node packages
+        run: yarn install
+
+      - name: Scan for security vulnerabilities in JavaScript dependencies
+        run: yarn npm audit
 
   lint:
     if: ${{ inputs.lint == true }}
