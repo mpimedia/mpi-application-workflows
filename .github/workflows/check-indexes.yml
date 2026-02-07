@@ -26,7 +26,7 @@ jobs:
         with:
           server_address: smtp.postmarkapp.com
           server_port: 587
-          secure: true
+          secure: false
           username: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
           password: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
           subject: "❌ GitHub Action Failed: ${{ github.repository }} – ${{ github.workflow }}"
@@ -34,11 +34,13 @@ jobs:
           from: ${{ secrets.WORKFLOW_FROM_EMAIL }}
           body: |
             Workflow:  ${{ github.workflow }}
-            Job:       ${{ github.job }}
             Branch:    ${{ github.ref_name }}
             Commit:    ${{ github.event.head_commit.message || 'N/A' }}
             SHA:       ${{ github.sha }}
             Author:    ${{ github.actor }}
             Triggered: ${{ github.event_name }}
+
+            Job Results:
+              check-indexes: ${{ needs.check-indexes.result }}
 
             View run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
