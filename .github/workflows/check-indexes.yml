@@ -14,3 +14,31 @@ jobs:
 
       - name: Check Migration Indexes
         uses: speedshop/ids_must_be_indexed@v1.2.3
+
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [check-indexes]
+    if: failure()
+    steps:
+      - name: Send failure notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.postmarkapp.com
+          server_port: 587
+          secure: true
+          username: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
+          password: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
+          subject: "❌ GitHub Action Failed: ${{ github.repository }} – ${{ github.workflow }}"
+          to: ${{ secrets.WORKFLOW_TO_EMAIL }}
+          from: ${{ secrets.WORKFLOW_FROM_EMAIL }}
+          body: |
+            Workflow:  ${{ github.workflow }}
+            Job:       ${{ github.job }}
+            Branch:    ${{ github.ref_name }}
+            Commit:    ${{ github.event.head_commit.message }}
+            SHA:       ${{ github.sha }}
+            Author:    ${{ github.actor }}
+            Triggered: ${{ github.event_name }}
+
+            View run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
