@@ -36,7 +36,7 @@ jobs:
             Workflow:  ${{ github.workflow }}
             Job:       ${{ github.job }}
             Branch:    ${{ github.ref_name }}
-            Commit:    ${{ github.event.head_commit.message }}
+            Commit:    ${{ github.event.head_commit.message || 'N/A' }}
             SHA:       ${{ github.sha }}
             Author:    ${{ github.actor }}
             Triggered: ${{ github.event_name }}
