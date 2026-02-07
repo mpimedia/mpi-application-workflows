@@ -22,3 +22,33 @@ jobs:
         run: |
           chmod +x bin/update-gems
           bin/update-gems
+
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [update-gems]
+    if: failure()
+    steps:
+      - name: Send failure notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.postmarkapp.com
+          server_port: 587
+          secure: false
+          username: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
+          password: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
+          subject: "❌ GitHub Action Failed: ${{ github.repository }} – ${{ github.workflow }}"
+          to: ${{ secrets.WORKFLOW_TO_EMAIL }}
+          from: ${{ secrets.WORKFLOW_FROM_EMAIL }}
+          body: |
+            Workflow:  ${{ github.workflow }}
+            Branch:    ${{ github.ref_name }}
+            Commit:    ${{ github.event.head_commit.message || 'N/A' }}
+            SHA:       ${{ github.sha }}
+            Author:    ${{ github.actor }}
+            Triggered: ${{ github.event_name }}
+
+            Job Results:
+              update-gems: ${{ needs.update-gems.result }}
+
+            View run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
