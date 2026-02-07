@@ -36,25 +36,42 @@ jobs:
     if: failure()
     steps:
       - name: Send failure notification
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.postmarkapp.com
-          server_port: 587
-          secure: false
-          username: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
-          password: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
-          subject: "❌ GitHub Action Failed: ${{ github.repository }} – ${{ github.workflow }}"
-          to: ${{ secrets.WORKFLOW_TO_EMAIL }}
-          from: ${{ secrets.WORKFLOW_FROM_EMAIL }}
-          body: |
-            Workflow:  ${{ github.workflow }}
-            Branch:    ${{ github.ref_name }}
-            Commit:    ${{ github.event.head_commit.message || 'N/A' }}
-            SHA:       ${{ github.sha }}
-            Author:    ${{ github.actor }}
-            Triggered: ${{ github.event_name }}
+        env:
+          POSTMARK_TOKEN: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
+          WORKFLOW_FROM: ${{ secrets.WORKFLOW_FROM_EMAIL }}
+          WORKFLOW_TO: ${{ secrets.WORKFLOW_TO_EMAIL }}
+        run: |
+          SUBJECT="\u274c GitHub Action Failed: ${{ github.repository }} \u2013 ${{ github.workflow }}"
+          BODY=$(cat <<'BODY_EOF'
+          Workflow:  ${{ github.workflow }}
+          Branch:    ${{ github.ref_name }}
+          Commit:    ${{ github.event.head_commit.message || 'N/A' }}
+          SHA:       ${{ github.sha }}
+          Author:    ${{ github.actor }}
+          Triggered: ${{ github.event_name }}
 
-            Job Results:
-              update-packages: ${{ needs.update-packages.result }}
+          Job Results:
+            update-packages: ${{ needs.update-packages.result }}
 
-            View run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          View run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BODY_EOF
+          )
+          JSON=$(jq -n \
+            --arg from "$WORKFLOW_FROM" \
+            --arg to "$WORKFLOW_TO" \
+            --arg subject "$SUBJECT" \
+            --arg body "$BODY" \
+            '{From: $from, To: $to, Subject: $subject, TextBody: $body}')
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST "https://api.postmarkapp.com/email" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -H "X-Postmark-Server-Token: $POSTMARK_TOKEN" \
+            -d "$JSON")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          RESP_BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "Postmark response (HTTP $HTTP_CODE): $RESP_BODY"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Postmark API returned HTTP $HTTP_CODE: $RESP_BODY"
+            exit 1
+          fi
