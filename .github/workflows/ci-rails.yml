@@ -40,6 +40,20 @@ on:
         type: string
 
 jobs:
+  # Read .tool-versions from the calling repo to extract version numbers
+  # that are needed before steps run (e.g. for Docker service container images).
+  read_versions:
+    runs-on: ubuntu-latest
+    outputs:
+      postgres: ${{ steps.versions.outputs.postgres }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read .tool-versions
+        uses: marocchino/tool-versions-action@v1
+        id: versions
+
   scan_ruby:
     if: ${{ inputs.security_scan == true }}
     runs-on: ubuntu-latest
@@ -144,6 +158,7 @@ jobs:
   # Test job without Elasticsearch (default)
   test:
     if: ${{ inputs.elasticsearch == false }}
+    needs: read_versions
     runs-on: ubuntu-latest
 
     env:
@@ -152,7 +167,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:latest
+        image: postgres:${{ needs.read_versions.outputs.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -160,10 +175,10 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -207,6 +222,7 @@ jobs:
   # Test job with Elasticsearch
   test_with_elasticsearch:
     if: ${{ inputs.elasticsearch == true }}
+    needs: read_versions
     runs-on: ubuntu-latest
 
     env:
@@ -216,7 +232,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:latest
+        image: postgres:${{ needs.read_versions.outputs.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -224,10 +240,10 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -276,7 +292,7 @@ jobs:
   notify-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
-    needs: [scan_ruby, scan_js_importmap, scan_js_jsbundling, lint, test, test_with_elasticsearch]
+    needs: [read_versions, scan_ruby, scan_js_importmap, scan_js_jsbundling, lint, test, test_with_elasticsearch]
     if: always() && contains(needs.*.result, 'failure')
     steps:
       - name: Send failure notification
