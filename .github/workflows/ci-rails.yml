@@ -43,8 +43,8 @@ jobs:
   # Read .tool-versions from the calling repo to extract version numbers
   # that are needed before steps run (e.g. for Docker service container images).
   # For Postgres, the exact version is checked against Docker Hub. If the image
-  # doesn't exist yet (e.g. released today but not yet built), falls back to the
-  # major version tag which always resolves to the latest patch release.
+  # doesn't exist yet (e.g. released today but not yet built), it falls back to the
+  # major version tag, which always resolves to the latest patch release.
   read_versions:
     runs-on: ubuntu-latest
     outputs:
@@ -60,14 +60,18 @@ jobs:
       - name: Resolve Postgres Docker tag
         id: pg_resolve
         run: |
+          set -euo pipefail
           EXACT="${{ steps.versions.outputs.postgres }}"
           if docker manifest inspect "postgres:${EXACT}" > /dev/null 2>&1; then
             echo "version=${EXACT}" >> "$GITHUB_OUTPUT"
             echo "Using exact version: postgres:${EXACT}"
-          else
+          elif docker manifest inspect "postgres:$(echo "${EXACT}" | cut -d. -f1)" > /dev/null 2>&1; then
             MAJOR=$(echo "${EXACT}" | cut -d. -f1)
             echo "version=${MAJOR}" >> "$GITHUB_OUTPUT"
             echo "::warning::postgres:${EXACT} not yet available on Docker Hub, falling back to postgres:${MAJOR}"
+          else
+            echo "::error::Cannot resolve any Postgres Docker tag for version ${EXACT}"
+            exit 1
           fi
 
   scan_ruby:
