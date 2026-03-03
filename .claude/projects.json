@@ -1,0 +1,76 @@
+{
+  "mpi_projects": {
+    "ci_workflows": {
+      "name": "MPI Application Workflows",
+      "description": "Shared GitHub Actions CI/CD workflows for all MPI apps",
+      "github_url": "https://github.com/mpimedia/mpi-application-workflows",
+      "github_org": "mpimedia",
+      "github_repo": "mpi-application-workflows",
+      "role": "ci_cd"
+    },
+    "optimus": {
+      "name": "Optimus",
+      "description": "Rails application template and pattern source",
+      "github_url": "https://github.com/mpimedia/optimus",
+      "github_org": "mpimedia",
+      "github_repo": "optimus",
+      "role": "template"
+    },
+    "avails": {
+      "name": "Markaz (Avails Server)",
+      "description": "Central data repository for MPI Media",
+      "github_url": "https://github.com/mpimedia/avails_server",
+      "github_org": "mpimedia",
+      "github_repo": "avails_server",
+      "role": "data_repository"
+    },
+    "sfa": {
+      "name": "SFA Film Library",
+      "description": "Video clip hosting and search engine (MPI Stock Footage Archive)",
+      "github_url": "https://github.com/mpimedia/wpa_film_library",
+      "github_org": "mpimedia",
+      "github_repo": "wpa_film_library",
+      "role": "media_library"
+    },
+    "garden": {
+      "name": "Garden",
+      "description": "CMS for MPI websites with Cloudflare caching and theme system",
+      "github_url": "https://github.com/mpimedia/garden",
+      "github_org": "mpimedia",
+      "github_repo": "garden",
+      "role": "cms"
+    },
+    "harvest": {
+      "name": "Harvest",
+      "description": "Public-facing transaction and ecommerce platform",
+      "github_url": "https://github.com/mpimedia/harvest",
+      "github_org": "mpimedia",
+      "github_repo": "harvest",
+      "role": "ecommerce"
+    },
+    "markez_crm": {
+      "name": "Markaz CRM",
+      "description": "CRM application (planned merge into Markaz/avails_server)",
+      "github_url": "https://github.com/mpimedia/markez-crm",
+      "github_org": "mpimedia",
+      "github_repo": "markez-crm",
+      "role": "crm"
+    },
+    "infrastructure": {
+      "name": "MPI Infrastructure",
+      "description": "Terraform infrastructure and deployment configuration",
+      "github_url": "https://github.com/mpimedia/mpi-infrastructure",
+      "github_org": "mpimedia",
+      "github_repo": "mpi-infrastructure",
+      "role": "infrastructure"
+    },
+    "github_org": {
+      "name": "MPI GitHub Org Config",
+      "description": "Organization-level GitHub configuration and templates",
+      "github_url": "https://github.com/mpimedia/.github",
+      "github_org": "mpimedia",
+      "github_repo": ".github",
+      "role": "org_config"
+    }
+  }
+}
