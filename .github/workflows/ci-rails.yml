@@ -77,6 +77,8 @@ jobs:
   scan_ruby:
     if: ${{ inputs.security_scan == true }}
     runs-on: ubuntu-latest
+    env:
+      BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
 
     steps:
       - name: Checkout repository
@@ -101,6 +103,8 @@ jobs:
   scan_js_importmap:
     if: ${{ inputs.security_scan == true && inputs.importmap == true }}
     runs-on: ubuntu-latest
+    env:
+      BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
 
     steps:
       - name: Checkout repository
@@ -147,6 +151,7 @@ jobs:
     if: ${{ inputs.lint == true }}
     runs-on: ubuntu-latest
     env:
+      BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RUBOCOP_CACHE_ROOT: tmp/rubocop
     steps:
       - name: Checkout repository
@@ -182,6 +187,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RAILS_ENV: test
       RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
 
@@ -246,6 +252,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RAILS_ENV: test
       ELASTICSEARCH_URL: http://localhost:9200
       RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
