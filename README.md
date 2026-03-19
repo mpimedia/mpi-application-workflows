@@ -54,6 +54,20 @@ Migration index checking:
 - Runs on PRs that modify migrations
 - Ensures all foreign keys have indexes
 
+### deploy-kamal.yml
+
+Deployment via Kamal:
+- Deploys Rails applications using Kamal
+- Supports staging and production environments
+- Uses 1Password CLI for secrets management
+- Configures Docker buildx with GitHub Actions cache
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `environment` | string | *(required)* | Target environment (`staging` or `production`) |
+
 ## Usage
 
 ### CI Pipeline (Standard)
@@ -176,6 +190,35 @@ on:
 jobs:
   check:
     uses: mpimedia/mpi-application-workflows/.github/workflows/check-indexes.yml@main
+```
+
+### Deployment (Kamal)
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+concurrency:
+  group: deploy-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy:
+    uses: mpimedia/mpi-application-workflows/.github/workflows/deploy-kamal.yml@main
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit
 ```
 
 ## Version Pinning
