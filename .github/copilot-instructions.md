@@ -14,6 +14,7 @@ This file provides guidance for GitHub Copilot coding agents working with this r
 | `update-gems.yml` | Daily automated gem updates via PR |
 | `update-packages.yml` | Daily automated package updates via PR |
 | `check-indexes.yml` | Validate migration indexes |
+| `deploy-kamal.yml` | Kamal deployment to staging/production |
 
 All are callable workflows (`workflow_call`) pinned by SHA in consumer repos.
 

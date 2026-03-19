@@ -14,6 +14,7 @@ MPI Application Workflows provides **shared, reusable GitHub Actions CI/CD workf
 | `update-gems.yml` | Daily automated gem updates via PR |
 | `update-packages.yml` | Daily automated package updates via PR |
 | `check-indexes.yml` | Validate migration indexes |
+| `deploy-kamal.yml` | Kamal deployment to staging/production |
 
 All are callable workflows (`workflow_call`) referenced by consumers via pinned SHA.
 
