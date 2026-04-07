@@ -59,6 +59,7 @@ Migration index checking:
 Deployment via Kamal:
 - Deploys Rails applications using Kamal
 - Supports staging and production environments
+- Uses Tailscale for secure network connectivity to deployment targets
 - Uses 1Password CLI for secrets management
 - Configures Docker buildx with GitHub Actions cache
 
