@@ -17,6 +17,11 @@ jobs:
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_DEPLOYMENT_TOKEN }}
 
@@ -35,18 +40,12 @@ jobs:
         with:
           bundler-cache: true
 
-      - name: Configure SSH Key
-        uses: webfactory/ssh-agent@v0.10.0
+      - name: Set up Tailscale
+        uses: tailscale/github-action@v4
         with:
-          ssh-private-key: ${{ secrets.DEPLOYMENT_PRIVATE_KEY }}
-
-      - name: Add host key to known_hosts
-        run: |
-          mkdir -p -m 700 ~/.ssh/
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-        env:
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
 
       - name: Install 1Password CLI
         uses: 1password/install-cli-action@v2
