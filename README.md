@@ -222,6 +222,46 @@ jobs:
     secrets: inherit
 ```
 
+## Deploy Workflow Setup
+
+The deploy workflow uses [Tailscale's GitHub Actions OIDC integration](https://tailscale.com/kb/1258/github-actions) to establish secure connectivity to deployment targets. Consumer repos need the following configuration before using the deploy workflow.
+
+### Required Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID for the GitHub Actions OIDC integration |
+| `TS_AUDIENCE` | Tailscale OIDC audience value, used to scope the identity token to your tailnet |
+| `OP_SERVICE_ACCOUNT_DEPLOYMENT_TOKEN` | 1Password service account token for secrets management during deploy |
+
+### Consumer Permissions
+
+The deploy workflow requires `id-token: write` so GitHub can issue an OIDC token for Tailscale authentication. Since `secrets: inherit` does not propagate permissions, the **consumer workflow must set this permission itself**:
+
+```yaml
+# .github/workflows/deploy.yml
+jobs:
+  deploy:
+    uses: mpimedia/mpi-application-workflows/.github/workflows/deploy-kamal.yml@main
+    with:
+      environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    secrets: inherit
+```
+
+### Creating the Tailscale Federated Identity
+
+1. In the [Tailscale admin console](https://login.tailscale.com/admin/settings/oauth), create a new **OAuth client**.
+2. Under the OAuth client settings, add a **GitHub Actions OIDC** provider.
+3. Configure the provider to trust tokens from your consumer repository (e.g., `mpimedia/optimus`).
+4. Set the **audience** value — this becomes the `TS_AUDIENCE` secret.
+5. Copy the **OAuth client ID** — this becomes the `TS_OAUTH_CLIENT_ID` secret.
+6. Add both values as repository or organization secrets in GitHub.
+7. Tag the OAuth client with `tag:ci` (or the tag matching your Tailscale ACLs) so the ephemeral node gets the correct network access.
+
 ## Version Pinning
 
 For stability, you can pin to a specific commit or tag:
