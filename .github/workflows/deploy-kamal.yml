@@ -11,12 +11,16 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write
 
 jobs:
   deploy:
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
 
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_DEPLOYMENT_TOKEN }}
