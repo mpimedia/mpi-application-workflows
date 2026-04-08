@@ -7,6 +7,11 @@ on:
         description: "Target environment"
         required: true
         type: string
+      tailscale_ping:
+        description: "Comma-separated list of Tailscale hosts to ping after connection"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -46,6 +51,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
+          ping: ${{ inputs.tailscale_ping }}
 
       - name: Install 1Password CLI
         uses: 1password/install-cli-action@v2
