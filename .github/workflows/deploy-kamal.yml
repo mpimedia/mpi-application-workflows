@@ -7,8 +7,8 @@ on:
         description: "Target environment"
         required: true
         type: string
-      tailscale_ping:
-        description: "Comma-separated list of Tailscale hosts to ping after connection"
+      tailscale_hosts:
+        description: 'Comma-separated Tailscale host addresses (e.g. "host1,host2")'
         required: false
         type: string
         default: ""
@@ -51,7 +51,13 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
-          ping: ${{ inputs.tailscale_ping }}
+          ping: ${{ inputs.tailscale_hosts }}
+
+      - name: Set up SSH config to accept new Tailscale hosts
+        run: |
+          mkdir -p ~/.ssh
+          echo "StrictHostKeyChecking accept-new" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
 
       - name: Install 1Password CLI
         uses: 1password/install-cli-action@v2
