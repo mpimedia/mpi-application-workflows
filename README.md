@@ -60,6 +60,8 @@ Deployment via Kamal:
 - Deploys Rails applications using Kamal
 - Supports staging and production environments
 - Uses Tailscale for secure network connectivity to deployment targets
+- Optionally pings Tailscale hosts to verify connectivity before deploying
+- Configures SSH to automatically accept new Tailscale host keys
 - Uses 1Password CLI for secrets management
 - Configures Docker buildx with GitHub Actions cache
 
@@ -68,6 +70,7 @@ Deployment via Kamal:
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `environment` | string | *(required)* | Target environment (`staging` or `production`) |
+| `tailscale_hosts` | string | `""` | Comma-separated Tailscale host addresses to ping for connectivity verification (e.g. `"host1,host2"`) |
 
 ## Usage
 
@@ -219,6 +222,7 @@ jobs:
     uses: mpimedia/mpi-application-workflows/.github/workflows/deploy-kamal.yml@main
     with:
       environment: ${{ inputs.environment }}
+      tailscale_hosts: "web-server,worker-server"
     secrets: inherit
 ```
 

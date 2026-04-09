@@ -14,7 +14,7 @@ MPI Application Workflows provides shared, reusable GitHub Actions CI/CD workflo
 | `update-gems.yml` | Daily automated gem updates | — |
 | `update-packages.yml` | Daily automated package updates | — |
 | `check-indexes.yml` | Migration index validation | — |
-| `deploy-kamal.yml` | Kamal deployment (staging/production) | `environment` |
+| `deploy-kamal.yml` | Kamal deployment (staging/production) | `environment`, `tailscale_hosts` |
 
 All workflows support failure notifications via Postmark API.
 
