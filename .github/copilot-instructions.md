@@ -4,7 +4,7 @@ This file provides guidance for GitHub Copilot coding agents working with this r
 
 ## Project Overview
 
-**MPI Application Workflows** provides shared, reusable GitHub Actions CI/CD workflows consumed by all MPI Media Rails applications (Optimus, Markaz, SFA, Garden, Harvest, Markaz CRM). This is NOT a Rails app — it contains only GitHub Actions YAML workflow files.
+**MPI Application Workflows** provides shared, reusable GitHub Actions CI/CD workflows consumed by all MPI Media Rails applications (Optimus, Markaz, SFA, Garden, Harvest). This is NOT a Rails app — it contains only GitHub Actions YAML workflow files.
 
 ## Workflows
 
@@ -20,7 +20,7 @@ All are callable workflows (`workflow_call`) pinned by SHA in consumer repos.
 
 ## Key Constraints
 
-- **Breaking changes require consumer coordination** — 6+ repos depend on these workflows
+- **Breaking changes require consumer coordination** — 5+ repos depend on these workflows
 - **Workflow filenames must not change** — consumers reference by path
 - **Never add secrets to workflow files** — use `secrets` context
 - **Test from a consumer repo** before merging — no local test infrastructure exists
@@ -32,4 +32,4 @@ Every AI agent **must** include attribution: `Co-Authored-By` trailer on commits
 
 ## Consumer Repos
 
-Optimus, Markaz (avails_server), SFA (wpa_film_library), Garden, Harvest, Markaz CRM (markez-crm) — all under `mpimedia/` org.
+Optimus, Markaz (avails_server), SFA (wpa_film_library), Garden, Harvest — all under `mpimedia/` org.
