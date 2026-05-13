@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## About This Project
 
-MPI Application Workflows provides shared, reusable GitHub Actions CI/CD workflows consumed by all MPI Media Rails applications. Changes to these workflows affect the entire ecosystem — Optimus, Markaz, SFA, Garden, Harvest, and Markaz CRM all pin to a specific commit SHA for stability.
+MPI Application Workflows provides shared, reusable GitHub Actions CI/CD workflows consumed by all MPI Media Rails applications. Changes to these workflows affect the entire ecosystem — Optimus, Markaz, SFA, Garden, and Harvest all pin to a specific commit SHA for stability.
 
 ## Workflows
 
@@ -95,5 +95,4 @@ These are non-negotiable. Never do any of the following:
 | SFA | `mpimedia/wpa_film_library` | Consumer |
 | Garden | `mpimedia/garden` | Consumer |
 | Harvest | `mpimedia/harvest` | Consumer |
-| Markaz CRM | `mpimedia/markez-crm` | Consumer |
 | Infrastructure | `mpimedia/mpi-infrastructure` | Separate (Terraform) |

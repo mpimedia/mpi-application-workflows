@@ -4,7 +4,7 @@ Instructions for all AI coding agents (Claude Code, Copilot, Codex, and others) 
 
 ## Project Identity
 
-MPI Application Workflows provides **shared, reusable GitHub Actions CI/CD workflows** consumed by all MPI Media Rails applications. This is NOT a Rails app — it contains only GitHub Actions YAML workflow files. Changes here affect 6+ consumer repos.
+MPI Application Workflows provides **shared, reusable GitHub Actions CI/CD workflows** consumed by all MPI Media Rails applications. This is NOT a Rails app — it contains only GitHub Actions YAML workflow files. Changes here affect 5+ consumer repos.
 
 ## Workflows
 
@@ -28,7 +28,6 @@ All are callable workflows (`workflow_call`) referenced by consumers via pinned 
 | SFA | `mpimedia/wpa_film_library` | Consumer |
 | Garden | `mpimedia/garden` | Consumer |
 | Harvest | `mpimedia/harvest` | Consumer |
-| Markaz CRM | `mpimedia/markez-crm` | Consumer |
 
 ## Pre-Commit Requirements
 

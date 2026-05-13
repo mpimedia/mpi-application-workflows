@@ -48,14 +48,6 @@
       "github_repo": "harvest",
       "role": "ecommerce"
     },
-    "markez_crm": {
-      "name": "Markaz CRM",
-      "description": "CRM application (planned merge into Markaz/avails_server)",
-      "github_url": "https://github.com/mpimedia/markez-crm",
-      "github_org": "mpimedia",
-      "github_repo": "markez-crm",
-      "role": "crm"
-    },
     "infrastructure": {
       "name": "MPI Infrastructure",
       "description": "Terraform infrastructure and deployment configuration",
