@@ -7,9 +7,19 @@
 # versions younger than N days — the supply-chain protection lives in the
 # resolver, not in this script.
 #
-# Flow: unpin -> bundle update --all (cooldown-enforced) -> repin from the
-# lockfile. MPI Gemfiles use exact pins, which `bundle update` alone cannot
-# move; see scripts/lib/gemfile_edit.rb for the pin-editing rules.
+# Flow: unpin -> fresh `bundle lock` (cooldown-enforced) -> repin from the
+# lockfile with a never-downgrade floor. MPI Gemfiles use exact pins, which
+# `bundle update` alone cannot move; see scripts/lib/gemfile_edit.rb for the
+# pin-editing rules.
+#
+# Why fresh-lock instead of `bundle update --all`: Bundler's cooldown hides
+# in-window versions from resolution even when they are ALREADY LOCKED (e.g.
+# right after cooldown adoption, or after a CVE escape-hatch update), which
+# makes any lockfile-aware re-resolution fail outright. A fresh lock resolves
+# cleanly under the cooldown; gems whose locked version is in-window would be
+# downgraded, so repin applies a floor (keep the already-locked version) and a
+# final `bundle lock --cooldown 0` sync re-admits ONLY those already-shipped
+# versions — no new supply-chain exposure.
 #
 # Environment:
 #   DRY_RUN=true   Compute and print the would-be PR, then restore all files.
@@ -75,7 +85,10 @@ trap on_error ERR
 # --- Record gems held back by Gemfile comments (never touched) ---
 SKIPPED_GEMS="$(ruby "$GEMFILE_EDIT" comments Gemfile)"
 
-# --- Unpin -> resolve under cooldown -> repin from the lockfile ---
+# --- Preserve the lockfile's platform list (a fresh lock would lose it) ---
+LOCK_PLATFORMS="$(ruby "$GEMFILE_EDIT" platforms Gemfile.lock)"
+
+# --- Unpin -> fresh resolve under cooldown -> repin with floor ---
 echo -e "${YELLOW}Stripping exact pins from uncommented gems...${NC}"
 ruby "$GEMFILE_EDIT" unpin Gemfile
 
@@ -83,16 +96,34 @@ echo -e "${YELLOW}Updating bundler to latest version...${NC}"
 gem install bundler --no-document
 bundle update --bundler
 
-echo -e "${YELLOW}Resolving updates (cooldown enforced by Bundler)...${NC}"
-bundle update --all
+echo -e "${YELLOW}Resolving fresh lockfile (cooldown enforced by Bundler)...${NC}"
+rm Gemfile.lock
+bundle lock --add-checksums
 
-echo -e "${YELLOW}Re-pinning Gemfile from resolved lockfile versions...${NC}"
-ruby "$GEMFILE_EDIT" repin "$ORIG_GEMFILE" Gemfile.lock Gemfile
+echo -e "${YELLOW}Restoring lockfile platforms...${NC}"
+ADD_PLATFORM_ARGS=()
+while IFS= read -r PLATFORM; do
+  [ -z "$PLATFORM" ] && continue
+  ADD_PLATFORM_ARGS+=("$PLATFORM")
+done <<< "$LOCK_PLATFORMS"
+if [ ${#ADD_PLATFORM_ARGS[@]} -gt 0 ]; then
+  bundle lock --add-checksums --add-platform "${ADD_PLATFORM_ARGS[@]}"
+fi
 
-# Re-sync the lockfile DEPENDENCIES section with the re-pinned Gemfile. Pins
-# equal the resolved versions, so this cannot change any version.
-bundle install --quiet
-bundle check
+echo -e "${YELLOW}Re-pinning Gemfile from resolved lockfile versions (never below the previously locked version)...${NC}"
+FLOORED_GEMS="$(ruby "$GEMFILE_EDIT" repin "$ORIG_GEMFILE" Gemfile.lock Gemfile --floor "$ORIG_LOCK")"
+
+if [ -n "$FLOORED_GEMS" ]; then
+  # One or more gems are pinned above what the cooldown-filtered resolution
+  # produced (their already-locked versions are inside the cooldown window).
+  # Sync the lockfile to those pins with the cooldown disabled: every direct
+  # gem is exact-pinned at this point, so this re-admits only versions the
+  # app already ships — it cannot select anything new.
+  echo -e "${YELLOW}Keeping already-locked in-window versions (no downgrades):${NC}"
+  echo "$FLOORED_GEMS" | awk -F'\t' '{ printf "  - %s: resolver chose %s, keeping locked %s\n", $2, $3, $4 }'
+  # `bundle lock` has no --cooldown flag; the env var has the same precedence.
+  BUNDLE_COOLDOWN=0 bundle lock --add-checksums
+fi
 
 UPDATED_GEMS="$(ruby "$GEMFILE_EDIT" lockdiff "$ORIG_LOCK" Gemfile.lock)"
 
@@ -106,11 +137,26 @@ fi
 # --- Build PR content ---
 PR_TITLE="chore: Update Ruby gems ($(date +%Y-%m-%d))"
 
-UPDATED_LIST="$(echo "$UPDATED_GEMS" | awk -F'\t' '{ printf "- %s: %s → %s\n", $1, $2, $3 }')"
+UPDATED_LIST="$(echo "$UPDATED_GEMS" | awk -F'\t' '
+  $4 == "up"      { printf "- %s: %s → %s\n", $1, $2, $3 }
+  $4 == "added"   { printf "- %s: %s (new dependency)\n", $1, $3 }
+  $4 == "removed" { printf "- %s: %s (no longer required)\n", $1, $2 }
+')"
+# Transitive dependencies whose locked version is inside the cooldown window
+# resolve to an older release (they have no Gemfile pin to floor). This is
+# bounded, self-correcting flapping: the newer version re-selects once aged.
+DOWNGRADED_LIST="$(echo "$UPDATED_GEMS" | awk -F'\t' '
+  $4 == "down" { printf "- %s: %s → %s (locked version is inside the cooldown window; will re-update once aged)\n", $1, $2, $3 }
+')"
 if [ -n "$SKIPPED_GEMS" ]; then
   SKIPPED_LIST="$(echo "$SKIPPED_GEMS" | awk -F'\t' '{ printf "- %s — %s\n", $1, $2 }')"
 else
   SKIPPED_LIST="_None_"
+fi
+if [ -n "$FLOORED_GEMS" ]; then
+  FLOORED_LIST="$(echo "$FLOORED_GEMS" | awk -F'\t' '{ printf "- %s — kept at %s (cooldown-filtered resolution chose %s)\n", $2, $4, $3 }')"
+else
+  FLOORED_LIST="_None_"
 fi
 
 PR_BODY="## Gem Updates
@@ -120,7 +166,15 @@ configured minimum age were not considered.
 
 ### Updated gems
 
-${UPDATED_LIST}
+${UPDATED_LIST:-_None_}
+
+### Kept at already-locked versions (inside the cooldown window)
+
+${FLOORED_LIST}
+
+### Downgraded transitive dependencies (inside the cooldown window)
+
+${DOWNGRADED_LIST:-_None_}
 
 ### Skipped gems (held back by Gemfile comments)
 

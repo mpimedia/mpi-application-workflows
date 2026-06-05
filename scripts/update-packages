@@ -74,16 +74,77 @@ if [ -z "$DIRECT_DEPS" ]; then
   exit 0
 fi
 
+# Reads the exact version of a direct dependency from package.json.
+current_version_of() {
+  NAME="$1" node -e '
+    const pkg = require("./package.json");
+    const v = (pkg.dependencies || {})[process.env.NAME] || (pkg.devDependencies || {})[process.env.NAME] || "";
+    process.stdout.write(v.replace(/^[\^~>=<]+/, ""));
+  '
+}
+
+# Numeric segment-wise version comparison; echoes "older" when $1 < $2.
+# MPI package.json entries are exact x.y.z versions; a prerelease suffix
+# sorts below its release (1.2.3-rc1 < 1.2.3).
+compare_versions() {
+  A="$1" B="$2" node -e '
+    const parse = (v) => {
+      const [core, pre] = v.split("-");
+      return { nums: core.split(".").map(Number), pre: pre || null };
+    };
+    const a = parse(process.env.A), b = parse(process.env.B);
+    let result = "ok";
+    for (let i = 0; i < Math.max(a.nums.length, b.nums.length); i++) {
+      const x = a.nums[i] || 0, y = b.nums[i] || 0;
+      if (x < y) { result = "older"; break; }
+      if (x > y) { break; }
+      if (i === Math.max(a.nums.length, b.nums.length) - 1) {
+        if (a.pre && !b.pre) result = "older";
+        if (a.pre && b.pre && a.pre < b.pre) result = "older";
+      }
+    }
+    process.stdout.write(result);
+  ' 2>/dev/null || echo "ok"
+}
+
 echo -e "${YELLOW}Resolving updates per package (npmMinimalAgeGate enforced by Yarn)...${NC}"
 while IFS= read -r NAME; do
   [ -z "$NAME" ] && continue
+
+  BEFORE_VERSION="$(current_version_of "$NAME")"
+  # Per-package snapshot: lets us undo a single package's change without
+  # asking Yarn to re-resolve (restoring files never hits the age gate).
+  STEP_PKG="$(mktemp)"
+  STEP_LOCK="$(mktemp)"
+  cp package.json "$STEP_PKG"
+  cp yarn.lock "$STEP_LOCK"
+
   echo -e "${YELLOW}  yarn up ${NAME} --exact${NC}"
   if ! yarn up "$NAME" --exact; then
     # A package whose every candidate version is quarantined by the age gate
     # fails resolution; leave it at its current version and continue.
     echo -e "${RED}  ⚠ Could not update ${NAME}; leaving at current version${NC}"
+    cp "$STEP_PKG" package.json
+    cp "$STEP_LOCK" yarn.lock
+    continue
+  fi
+
+  AFTER_VERSION="$(current_version_of "$NAME")"
+  if [ -n "$BEFORE_VERSION" ] && [ -n "$AFTER_VERSION" ] && \
+     [ "$(compare_versions "$AFTER_VERSION" "$BEFORE_VERSION")" = "older" ]; then
+    # The age gate hid the currently-installed version (it is younger than
+    # the gate window — e.g. right after gate adoption or a CVE escape-hatch
+    # update), so Yarn resolved to an OLDER release. Never downgrade: restore
+    # this package's snapshot and move on.
+    echo -e "${YELLOW}  ⚠ ${NAME}: gate-filtered resolution chose ${AFTER_VERSION} < installed ${BEFORE_VERSION}; keeping installed version${NC}"
+    cp "$STEP_PKG" package.json
+    cp "$STEP_LOCK" yarn.lock
   fi
 done <<< "$DIRECT_DEPS"
+
+# Re-sync Yarn's install state with the final package.json/yarn.lock pair
+# (per-package restores can leave node_modules ahead of the lockfile).
+yarn install --immutable
 
 # --- No changes? Exit clean ---
 if git diff --quiet package.json yarn.lock 2>/dev/null; then
@@ -141,6 +202,7 @@ if [ "$DRY_RUN" = "true" ]; then
   echo "$PR_BODY"
   echo -e "${BLUE}--- DRY RUN: restoring original package.json and yarn.lock ---${NC}"
   restore_originals
+  yarn install --immutable
   echo -e "${GREEN}=== Dry run complete ===${NC}"
   exit 0
 fi

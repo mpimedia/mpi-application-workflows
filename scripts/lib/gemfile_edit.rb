@@ -10,10 +10,18 @@
 #
 # Modes:
 #   unpin <gemfile>                          Strip version pins in place
-#   repin <original> <lockfile> <gemfile>    Rewrite <gemfile> from <original>,
-#                                            pinning to versions in <lockfile>
+#   repin <original> <lockfile> <gemfile> [--floor <original_lockfile>]
+#                                            Rewrite <gemfile> from <original>,
+#                                            pinning to versions in <lockfile>.
+#                                            With --floor, never pin below the
+#                                            version in <original_lockfile> —
+#                                            prints "FLOOR name resolved kept"
+#                                            for each floored gem.
 #   comments <gemfile>                       List skipped gems (name<TAB>comment)
-#   lockdiff <old_lock> <new_lock>           List changes (name<TAB>old<TAB>new)
+#   lockdiff <old_lock> <new_lock>           List changes, one per line:
+#                                            name<TAB>old<TAB>new<TAB>direction
+#                                            (direction: up|down|added|removed)
+#   platforms <lockfile>                     List lockfile PLATFORMS, one per line
 #
 # Rules (matching the legacy per-app scripts):
 #   - Lines containing a "#" comment are never modified ("skip" semantics —
@@ -22,6 +30,12 @@
 #   - Quoting style and trailing options (require:, group:, etc.) are preserved.
 #   - Multi-requirement pins (">= 1.0", "< 2.0") collapse to one exact pin on
 #     repin — MPI convention is exact pins.
+#
+# The --floor option exists because Bundler's cooldown hides versions younger
+# than the cooldown window from resolution entirely — including versions the
+# app already ships (e.g. after a CVE escape-hatch update, or on first
+# adoption). Resolving fresh under the cooldown would otherwise DOWNGRADE
+# such gems; the floor keeps them at the already-locked version instead.
 
 require "bundler"
 
@@ -76,8 +90,9 @@ def unpin(gemfile_path)
   File.write(gemfile_path, updated.join)
 end
 
-def repin(original_path, lockfile_path, gemfile_path)
+def repin(original_path, lockfile_path, gemfile_path, floor_lock_path: nil)
   versions = locked_versions(lockfile_path)
+  floors = floor_lock_path ? locked_versions(floor_lock_path) : {}
   lines = File.readlines(original_path)
   updated = lines.map do |line|
     parsed = parse_gem_line(line)
@@ -89,8 +104,15 @@ def repin(original_path, lockfile_path, gemfile_path)
       next line
     end
 
+    floor = floors[parsed[:name]]
+    pin = resolved
+    if floor && floor > resolved
+      pin = floor
+      puts "FLOOR\t#{parsed[:name]}\t#{resolved}\t#{floor}"
+    end
+
     quote = parsed[:quote]
-    "#{parsed[:indent]}gem#{parsed[:space]}#{quote}#{parsed[:name]}#{quote}, #{quote}#{resolved}#{quote}#{parsed[:remainder]}"
+    "#{parsed[:indent]}gem#{parsed[:space]}#{quote}#{parsed[:name]}#{quote}, #{quote}#{pin}#{quote}#{parsed[:remainder]}"
   end
   File.write(gemfile_path, updated.join)
 end
@@ -109,19 +131,33 @@ def lockdiff(old_lock_path, new_lock_path)
   old_versions = locked_versions(old_lock_path)
   new_versions = locked_versions(new_lock_path)
   (old_versions.keys | new_versions.keys).sort.each do |name|
-    old_version = old_versions[name]&.to_s || "-"
-    new_version = new_versions[name]&.to_s || "-"
-    puts "#{name}\t#{old_version}\t#{new_version}" if old_version != new_version
+    old_version = old_versions[name]
+    new_version = new_versions[name]
+    next if old_version == new_version
+
+    direction =
+      if old_version.nil? then "added"
+      elsif new_version.nil? then "removed"
+      elsif new_version > old_version then "up"
+      else "down"
+      end
+    puts "#{name}\t#{old_version || '-'}\t#{new_version || '-'}\t#{direction}"
   end
+end
+
+def platforms(lockfile_path)
+  parser = Bundler::LockfileParser.new(File.read(lockfile_path))
+  parser.platforms.each { |platform| puts platform }
 end
 
 def usage!
   abort <<~USAGE
     Usage:
       gemfile_edit.rb unpin <gemfile>
-      gemfile_edit.rb repin <original_gemfile> <lockfile> <gemfile>
+      gemfile_edit.rb repin <original_gemfile> <lockfile> <gemfile> [--floor <original_lockfile>]
       gemfile_edit.rb comments <gemfile>
       gemfile_edit.rb lockdiff <old_lockfile> <new_lockfile>
+      gemfile_edit.rb platforms <lockfile>
   USAGE
 end
 
@@ -130,14 +166,22 @@ when "unpin"
   usage! unless ARGV.length == 2
   unpin(ARGV[1])
 when "repin"
-  usage! unless ARGV.length == 4
-  repin(ARGV[1], ARGV[2], ARGV[3])
+  if ARGV.length == 4
+    repin(ARGV[1], ARGV[2], ARGV[3])
+  elsif ARGV.length == 6 && ARGV[4] == "--floor"
+    repin(ARGV[1], ARGV[2], ARGV[3], floor_lock_path: ARGV[5])
+  else
+    usage!
+  end
 when "comments"
   usage! unless ARGV.length == 2
   comments(ARGV[1])
 when "lockdiff"
   usage! unless ARGV.length == 3
   lockdiff(ARGV[1], ARGV[2])
+when "platforms"
+  usage! unless ARGV.length == 2
+  platforms(ARGV[1])
 else
   usage!
 end
