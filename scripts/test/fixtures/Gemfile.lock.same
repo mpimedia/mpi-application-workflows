@@ -1,0 +1,27 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    commented_pin (3.1.0)
+    grouped_gem (0.9.1)
+    kamal (2.4.0)
+    pinned_exact (1.2.3)
+    rails (8.1.3)
+    range_pin (1.0.0)
+    single_quoted (2.0.0)
+    with_options (1.24.5)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  commented_pin
+  grouped_gem
+  kamal
+  pinned_exact
+  rails
+  range_pin
+  single_quoted
+  with_options
+
+BUNDLED WITH
+   4.0.13
