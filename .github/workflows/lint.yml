@@ -1,0 +1,47 @@
+name: Lint
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run shellcheck on update scripts
+        run: shellcheck scripts/update-gems scripts/update-packages
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run actionlint
+        # -ignore: actionlint's context schema (as of 1.7.12) does not yet
+        # include job.workflow_repository / job.workflow_sha, which GitHub's
+        # contexts documentation defines for reusable workflows (used by the
+        # update workflows to check out their own scripts at the caller's
+        # pinned SHA). Remove once actionlint adds them.
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color \
+            -ignore 'property "workflow_repository" is not defined in object type' \
+            -ignore 'property "workflow_sha" is not defined in object type'
+
+  gemfile-edit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+
+      - name: Run gemfile_edit fixture tests
+        run: ruby scripts/test/gemfile_edit_test.rb

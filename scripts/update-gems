@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+#
+# Weekly gem update automation for MPI apps (centralized; see README.md).
+#
+# Runs against an app checkout (CWD must be the app root). The Gemfile's
+# rubygems source declares `cooldown: N`, so Bundler's resolver never selects
+# versions younger than N days — the supply-chain protection lives in the
+# resolver, not in this script.
+#
+# Flow: unpin -> fresh `bundle lock` (cooldown-enforced) -> repin from the
+# lockfile with a never-downgrade floor. MPI Gemfiles use exact pins, which
+# `bundle update` alone cannot move; see scripts/lib/gemfile_edit.rb for the
+# pin-editing rules.
+#
+# Why fresh-lock instead of `bundle update --all`: Bundler's cooldown hides
+# in-window versions from resolution even when they are ALREADY LOCKED (e.g.
+# right after cooldown adoption, or after a CVE escape-hatch update), which
+# makes any lockfile-aware re-resolution fail outright. A fresh lock resolves
+# cleanly under the cooldown; gems whose locked version is in-window would be
+# downgraded, so repin applies a floor (keep the already-locked version) and a
+# final `bundle lock --cooldown 0` sync re-admits ONLY those already-shipped
+# versions — no new supply-chain exposure.
+#
+# Environment:
+#   DRY_RUN=true   Compute and print the would-be PR, then restore all files.
+#                  Skips the branch guard, commit, push, and PR creation.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GEMFILE_EDIT="$SCRIPT_DIR/lib/gemfile_edit.rb"
+DRY_RUN="${DRY_RUN:-false}"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo -e "${BLUE}=== Gem Update Script (centralized) ===${NC}"
+if [ "$DRY_RUN" = "true" ]; then
+  echo -e "${YELLOW}DRY RUN: no branch, commit, push, or PR will be created${NC}"
+fi
+
+# --- Branch guard (skipped in dry-run so validation can run from any ref) ---
+CREATE_NEW_BRANCH=false
+BRANCH_NAME=""
+if [ "$DRY_RUN" != "true" ]; then
+  echo -e "${YELLOW}Checking current branch...${NC}"
+  CURRENT_BRANCH=$(git branch --show-current)
+  if [ "$CURRENT_BRANCH" = "main" ]; then
+    echo -e "${YELLOW}On main branch, will create new update branch${NC}"
+    CREATE_NEW_BRANCH=true
+    echo -e "${YELLOW}Pulling latest changes...${NC}"
+    git pull origin main
+  elif [[ "$CURRENT_BRANCH" == chore/update-gems-* ]]; then
+    echo -e "${YELLOW}On existing update branch: ${CURRENT_BRANCH}${NC}"
+    BRANCH_NAME="$CURRENT_BRANCH"
+  else
+    echo -e "${RED}Run from main or an existing chore/update-gems-* branch (or set DRY_RUN=true)${NC}"
+    exit 1
+  fi
+fi
+
+# Disable frozen mode so Gemfile.lock can be rewritten during automation
+echo -e "${YELLOW}Ensuring bundler frozen mode is disabled...${NC}"
+bundle config set --local frozen false
+
+# --- Snapshot originals; restore on any failure ---
+ORIG_GEMFILE="$(mktemp)"
+ORIG_LOCK="$(mktemp)"
+cp Gemfile "$ORIG_GEMFILE"
+cp Gemfile.lock "$ORIG_LOCK"
+
+restore_originals() {
+  cp "$ORIG_GEMFILE" Gemfile
+  cp "$ORIG_LOCK" Gemfile.lock
+}
+on_error() {
+  echo -e "${RED}Update failed; restoring Gemfile and Gemfile.lock${NC}"
+  restore_originals
+}
+trap on_error ERR
+
+# --- Record gems held back by Gemfile comments (never touched) ---
+SKIPPED_GEMS="$(ruby "$GEMFILE_EDIT" comments Gemfile)"
+
+# --- Preserve the lockfile's platform list (a fresh lock would lose it) ---
+LOCK_PLATFORMS="$(ruby "$GEMFILE_EDIT" platforms Gemfile.lock)"
+
+# --- Unpin -> fresh resolve under cooldown -> repin with floor ---
+echo -e "${YELLOW}Stripping exact pins from uncommented gems...${NC}"
+ruby "$GEMFILE_EDIT" unpin Gemfile
+
+echo -e "${YELLOW}Updating bundler to latest version...${NC}"
+gem install bundler --no-document
+bundle update --bundler
+
+echo -e "${YELLOW}Resolving fresh lockfile (cooldown enforced by Bundler)...${NC}"
+rm Gemfile.lock
+bundle lock --add-checksums
+
+echo -e "${YELLOW}Restoring lockfile platforms...${NC}"
+ADD_PLATFORM_ARGS=()
+while IFS= read -r PLATFORM; do
+  [ -z "$PLATFORM" ] && continue
+  ADD_PLATFORM_ARGS+=("$PLATFORM")
+done <<< "$LOCK_PLATFORMS"
+if [ ${#ADD_PLATFORM_ARGS[@]} -gt 0 ]; then
+  bundle lock --add-checksums --add-platform "${ADD_PLATFORM_ARGS[@]}"
+fi
+
+echo -e "${YELLOW}Re-pinning Gemfile from resolved lockfile versions (never below the previously locked version)...${NC}"
+FLOORED_GEMS="$(ruby "$GEMFILE_EDIT" repin "$ORIG_GEMFILE" Gemfile.lock Gemfile --floor "$ORIG_LOCK")"
+
+if [ -n "$FLOORED_GEMS" ]; then
+  # One or more gems are pinned above what the cooldown-filtered resolution
+  # produced (their already-locked versions are inside the cooldown window).
+  # Sync the lockfile to those pins with the cooldown disabled: every direct
+  # gem is exact-pinned at this point, so this re-admits only versions the
+  # app already ships — it cannot select anything new.
+  echo -e "${YELLOW}Keeping already-locked in-window versions (no downgrades):${NC}"
+  echo "$FLOORED_GEMS" | awk -F'\t' '{ printf "  - %s: resolver chose %s, keeping locked %s\n", $2, $3, $4 }'
+  # `bundle lock` has no --cooldown flag; the env var has the same precedence.
+  BUNDLE_COOLDOWN=0 bundle lock --add-checksums
+fi
+
+UPDATED_GEMS="$(ruby "$GEMFILE_EDIT" lockdiff "$ORIG_LOCK" Gemfile.lock)"
+
+# --- No changes? Restore and exit ---
+if git diff --quiet Gemfile Gemfile.lock 2>/dev/null; then
+  echo -e "${GREEN}✓ No gem updates available within the cooldown window.${NC}"
+  restore_originals
+  exit 0
+fi
+
+# --- Build PR content ---
+PR_TITLE="chore: Update Ruby gems ($(date +%Y-%m-%d))"
+
+UPDATED_LIST="$(echo "$UPDATED_GEMS" | awk -F'\t' '
+  $4 == "up"      { printf "- %s: %s → %s\n", $1, $2, $3 }
+  $4 == "added"   { printf "- %s: %s (new dependency)\n", $1, $3 }
+  $4 == "removed" { printf "- %s: %s (no longer required)\n", $1, $2 }
+')"
+# Transitive dependencies whose locked version is inside the cooldown window
+# resolve to an older release (they have no Gemfile pin to floor). This is
+# bounded, self-correcting flapping: the newer version re-selects once aged.
+DOWNGRADED_LIST="$(echo "$UPDATED_GEMS" | awk -F'\t' '
+  $4 == "down" { printf "- %s: %s → %s (locked version is inside the cooldown window; will re-update once aged)\n", $1, $2, $3 }
+')"
+if [ -n "$SKIPPED_GEMS" ]; then
+  SKIPPED_LIST="$(echo "$SKIPPED_GEMS" | awk -F'\t' '{ printf "- %s — %s\n", $1, $2 }')"
+else
+  SKIPPED_LIST="_None_"
+fi
+if [ -n "$FLOORED_GEMS" ]; then
+  FLOORED_LIST="$(echo "$FLOORED_GEMS" | awk -F'\t' '{ printf "- %s — kept at %s (cooldown-filtered resolution chose %s)\n", $2, $4, $3 }')"
+else
+  FLOORED_LIST="_None_"
+fi
+
+PR_BODY="## Gem Updates
+
+Versions resolved under the Gemfile cooldown — releases younger than the
+configured minimum age were not considered.
+
+### Updated gems
+
+${UPDATED_LIST:-_None_}
+
+### Kept at already-locked versions (inside the cooldown window)
+
+${FLOORED_LIST}
+
+### Downgraded transitive dependencies (inside the cooldown window)
+
+${DOWNGRADED_LIST:-_None_}
+
+### Skipped gems (held back by Gemfile comments)
+
+${SKIPPED_LIST}
+
+### Changes to Gemfile
+\`\`\`diff
+$(git diff Gemfile)
+\`\`\`
+
+### Changes to Gemfile.lock
+<details>
+<summary>Click to expand Gemfile.lock changes</summary>
+
+\`\`\`diff
+$(git diff Gemfile.lock)
+\`\`\`
+
+</details>
+
+*Generated automatically by \`mpi-application-workflows/scripts/update-gems\`*"
+
+# --- Dry run: report and restore ---
+if [ "$DRY_RUN" = "true" ]; then
+  echo -e "${BLUE}--- DRY RUN: would-be PR title ---${NC}"
+  echo "$PR_TITLE"
+  echo -e "${BLUE}--- DRY RUN: would-be PR body ---${NC}"
+  echo "$PR_BODY"
+  echo -e "${BLUE}--- DRY RUN: restoring original Gemfile and Gemfile.lock ---${NC}"
+  restore_originals
+  echo -e "${GREEN}=== Dry run complete ===${NC}"
+  exit 0
+fi
+
+# --- Commit, push, PR ---
+if [ "$CREATE_NEW_BRANCH" = "true" ]; then
+  BRANCH_NAME="chore/update-gems-$(date +%Y-%m-%d-%H%M%S)"
+  echo -e "${YELLOW}Creating branch: ${BRANCH_NAME}${NC}"
+  git checkout -b "$BRANCH_NAME"
+fi
+
+echo -e "${YELLOW}Committing changes...${NC}"
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git add Gemfile Gemfile.lock
+git commit -m "$PR_TITLE"
+
+echo -e "${YELLOW}Pushing branch to GitHub...${NC}"
+git push -u origin "$BRANCH_NAME"
+
+if [ "$CREATE_NEW_BRANCH" = "true" ]; then
+  if command -v gh &> /dev/null; then
+    if gh auth status >/dev/null 2>&1 || [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+      echo -e "${YELLOW}Creating pull request...${NC}"
+      gh pr create \
+        --title "$PR_TITLE" \
+        --body "$PR_BODY" \
+        --base main \
+        --head "$BRANCH_NAME"
+      echo -e "${GREEN}✓ Pull request created successfully!${NC}"
+    else
+      echo -e "${YELLOW}Skipping PR creation - authenticate gh or export GH_TOKEN.${NC}"
+      echo -e "${YELLOW}Branch pushed: ${BRANCH_NAME}${NC}"
+    fi
+  else
+    echo -e "${RED}GitHub CLI (gh) not installed. Please create the PR manually.${NC}"
+    echo -e "${YELLOW}Branch pushed: ${BRANCH_NAME}${NC}"
+    echo ""
+    echo "PR Title: $PR_TITLE"
+    echo ""
+    echo "PR Body:"
+    echo "$PR_BODY"
+  fi
+else
+  echo -e "${GREEN}✓ Changes pushed to existing branch: ${BRANCH_NAME}${NC}"
+  echo -e "${YELLOW}The existing PR will be updated automatically.${NC}"
+fi
+
+echo -e "${GREEN}=== Gem update complete! ===${NC}"

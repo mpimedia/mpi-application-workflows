@@ -2,16 +2,37 @@ name: Update Packages
 
 on:
   workflow_call:
+    inputs:
+      dry_run:
+        description: 'Compute and print the would-be update PR without creating a branch, commit, or PR'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   update-packages:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry_run }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # Checks out this workflow's own repository at the exact SHA the calling
+      # app pinned in `uses:` — the documented pattern for reusable workflows
+      # (job.workflow_repository / job.workflow_sha). Scripts therefore ride
+      # the same SHA-pin discipline as the workflow itself.
+      - name: Checkout mpi-application-workflows scripts
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpi-application-workflows
+
+      - name: Show resolved workflow source
+        run: echo "Running scripts from ${{ job.workflow_repository }}@${{ job.workflow_sha }}"
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -25,9 +46,7 @@ jobs:
           yarn install --immutable
 
       - name: Run update script
-        run: |
-          chmod +x bin/update-packages
-          bin/update-packages
+        run: bash "$GITHUB_WORKSPACE/.mpi-application-workflows/scripts/update-packages"
 
   notify-failure:
     name: Notify on Failure
@@ -40,20 +59,31 @@ jobs:
           POSTMARK_TOKEN: ${{ secrets.POSTMARK_NOTIFICATIONS_SMTP_TOKEN }}
           WORKFLOW_FROM: ${{ secrets.WORKFLOW_FROM_EMAIL }}
           WORKFLOW_TO: ${{ secrets.WORKFLOW_TO_EMAIL }}
+          # Untrusted/attacker-influenceable values are passed via env (never
+          # interpolated into the script body) to prevent workflow injection.
+          WORKFLOW_NAME: ${{ github.workflow }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          COMMIT_MSG: ${{ github.event.head_commit.message || 'N/A' }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ACTOR: ${{ github.actor }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          JOB_RESULT: ${{ needs.update-packages.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          SUBJECT="\u274c GitHub Action Failed: ${{ github.repository }} \u2013 ${{ github.workflow }}"
-          BODY=$(cat <<'BODY_EOF'
-          Workflow:  ${{ github.workflow }}
-          Branch:    ${{ github.ref_name }}
-          Commit:    ${{ github.event.head_commit.message || 'N/A' }}
-          SHA:       ${{ github.sha }}
-          Author:    ${{ github.actor }}
-          Triggered: ${{ github.event_name }}
+          SUBJECT=$(printf '\u274c GitHub Action Failed: %s \u2013 %s' "$REPO" "$WORKFLOW_NAME")
+          BODY=$(cat <<BODY_EOF
+          Workflow:  $WORKFLOW_NAME
+          Branch:    $BRANCH_NAME
+          Commit:    $COMMIT_MSG
+          SHA:       $COMMIT_SHA
+          Author:    $RUN_ACTOR
+          Triggered: $EVENT_NAME
 
           Job Results:
-            update-packages: ${{ needs.update-packages.result }}
+            update-packages: $JOB_RESULT
 
-          View run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          View run:  $RUN_URL
           BODY_EOF
           )
           JSON=$(jq -n \

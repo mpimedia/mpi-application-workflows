@@ -36,17 +36,68 @@ When `elasticsearch: true`, the workflow:
 
 ### update-gems.yml
 
-Automated Ruby gem updates:
-- Runs daily at 06:00 CST
-- Creates PRs for gem updates
-- Can be triggered manually
+Automated Ruby gem updates (apps schedule it weekly, Monday mornings):
+- Runs the centralized `scripts/update-gems` against the calling app's checkout
+- Honors the app Gemfile's release-age cooldown (`source "https://rubygems.org", cooldown: N`) —
+  Bundler's resolver never selects versions younger than N days
+- Flow: unpin exact pins → `bundle update --all` → repin from the resolved lockfile
+  (gems with a `#` comment in the Gemfile are never touched)
+- Creates a PR listing updated and skipped gems
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dry_run` | boolean | `false` | Compute and print the would-be update PR without creating a branch, commit, or PR |
 
 ### update-packages.yml
 
-Automated Node.js package updates:
-- Runs daily at 06:05 CST
-- Creates PRs for package updates
-- Can be triggered manually
+Automated Node.js package updates (apps schedule it weekly, Monday mornings):
+- Runs the centralized `scripts/update-packages` against the calling app's checkout
+- Honors Yarn's `npmMinimalAgeGate` (`.yarnrc.yml`) — `yarn up <pkg>` resolves to the
+  newest gate-compliant release, never to a fresher one
+- Creates a PR listing updated packages
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dry_run` | boolean | `false` | Compute and print the would-be update PR without creating a branch, commit, or PR |
+
+### lint.yml (this repository's own CI)
+
+Runs on every push to this repository:
+- `shellcheck` over `scripts/`
+- `actionlint` over `.github/workflows/`
+- Fixture tests for the Gemfile pin-editing library (`ruby scripts/test/gemfile_edit_test.rb`)
+
+## Centralized Update Scripts (`scripts/`)
+
+The update workflows do not rely on per-app `bin/` scripts. Each reusable workflow
+checks out **this repository at the exact SHA the calling app pinned in `uses:`**
+(via `job.workflow_repository` / `job.workflow_sha` — the documented pattern for
+reusable workflows referencing their own source) and runs:
+
+- `scripts/update-gems` — orchestrates unpin → resolve → repin (see `scripts/lib/gemfile_edit.rb`)
+- `scripts/update-packages` — per-package `yarn up <name> --exact` under the age gate
+
+Pinning an app to a workflow SHA therefore pins the script logic too. Bumping the
+pin is the only way an app picks up new update behavior.
+
+### Dependency cooldown escape hatch (CVE response)
+
+The cooldowns delay *fixes* as well as attacks. When a security advisory demands a
+release younger than the cooldown window, a human applies it — automation never
+bypasses the gate:
+
+- **Ruby:** on a branch, run `bundle update <gem> --cooldown 0`, and note the CVE in
+  the PR description.
+- **JavaScript:** temporarily add the package to `npmPreapprovedPackages` in
+  `.yarnrc.yml` (the entry is visible in the PR diff), run `yarn up <pkg> --exact`,
+  and remove the entry after merge.
+- **Brand-new packages:** `yarn add` of a package whose *every* version is younger
+  than the gate fails with an explicit quarantine error (Yarn ≥ 4.13). Use the same
+  `npmPreapprovedPackages` override.
 
 ### check-indexes.yml
 
@@ -149,12 +200,20 @@ name: Update Gems
 
 on:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * 1' # Mondays 06:00 CST (UTC-6)
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (compute and print updates; no branch/PR)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   update:
-    uses: mpimedia/mpi-application-workflows/.github/workflows/update-gems.yml@main
+    uses: mpimedia/mpi-application-workflows/.github/workflows/update-gems.yml@<sha> # pin to known-good SHA
+    with:
+      dry_run: ${{ inputs.dry_run || false }}
     secrets: inherit
 ```
 
@@ -166,12 +225,20 @@ name: Update Packages
 
 on:
   schedule:
-    - cron: '5 12 * * *'
+    - cron: '5 12 * * 1' # Mondays 06:05 CST (UTC-6)
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (compute and print updates; no branch/PR)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   update:
-    uses: mpimedia/mpi-application-workflows/.github/workflows/update-packages.yml@main
+    uses: mpimedia/mpi-application-workflows/.github/workflows/update-packages.yml@<sha> # pin to known-good SHA
+    with:
+      dry_run: ${{ inputs.dry_run || false }}
     secrets: inherit
 ```
 
