@@ -170,9 +170,12 @@ Dir.mktmpdir do |dir|
   assert_equal(EXPECTED_REPIN_UPDATED, File.read(gemfile), "repin --floor (newer resolved) content")
   assert_equal("", stdout, "repin --floor (newer resolved) reports nothing")
 
-  puts "platforms lists lockfile platforms"
-  stdout, = run_mode("platforms", File.join(FIXTURES, "Gemfile.lock.updated"))
-  assert_equal("arm64-darwin\nruby\n", stdout, "platforms output")
+  puts "platform_variants lists precompiled gem-variant platforms (excludes ruby)"
+  stdout, = run_mode("platform_variants", File.join(FIXTURES, "Gemfile.lock.updated"))
+  assert_equal("arm64-darwin\n", stdout, "platform_variants output (has a variant)")
+
+  stdout, = run_mode("platform_variants", File.join(FIXTURES, "Gemfile.lock.same"))
+  assert_equal("", stdout, "platform_variants output (no variants)")
 
   puts "comments lists skipped gems"
   stdout, = run_mode("comments", original)

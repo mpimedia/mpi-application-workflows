@@ -145,9 +145,19 @@ def lockdiff(old_lock_path, new_lock_path)
   end
 end
 
-def platforms(lockfile_path)
+# Unique non-"ruby" platforms that appear on resolved gem specs — i.e. the set
+# of precompiled platform variants the lockfile carries (e.g. arm64-darwin,
+# aarch64-linux). Used to assert an update never drops a platform's variants
+# (which would break that platform's `bundle install --frozen`). This is the
+# gem-variant platform set, distinct from the lockfile's PLATFORMS section.
+def platform_variants(lockfile_path)
   parser = Bundler::LockfileParser.new(File.read(lockfile_path))
-  parser.platforms.each { |platform| puts platform }
+  parser.specs
+        .map { |spec| spec.platform.to_s }
+        .reject { |platform| platform == "ruby" }
+        .uniq
+        .sort
+        .each { |platform| puts platform }
 end
 
 def usage!
@@ -157,7 +167,7 @@ def usage!
       gemfile_edit.rb repin <original_gemfile> <lockfile> <gemfile> [--floor <original_lockfile>]
       gemfile_edit.rb comments <gemfile>
       gemfile_edit.rb lockdiff <old_lockfile> <new_lockfile>
-      gemfile_edit.rb platforms <lockfile>
+      gemfile_edit.rb platform_variants <lockfile>
   USAGE
 end
 
@@ -179,9 +189,9 @@ when "comments"
 when "lockdiff"
   usage! unless ARGV.length == 3
   lockdiff(ARGV[1], ARGV[2])
-when "platforms"
+when "platform_variants"
   usage! unless ARGV.length == 2
-  platforms(ARGV[1])
+  platform_variants(ARGV[1])
 else
   usage!
 end
