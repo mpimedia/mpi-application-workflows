@@ -92,10 +92,14 @@ LOCK_PLATFORMS="$(ruby "$GEMFILE_EDIT" platforms Gemfile.lock)"
 echo -e "${YELLOW}Stripping exact pins from uncommented gems...${NC}"
 ruby "$GEMFILE_EDIT" unpin Gemfile
 
-echo -e "${YELLOW}Updating bundler to latest version...${NC}"
-gem install bundler --no-document
-bundle update --bundler
-
+# Bundler itself is deliberately NOT auto-updated here. `gem install bundler`
+# and `bundle update --bundler` fetch the newest Bundler outside the Gemfile
+# cooldown, and since Bundler executes on every `bundle install`, that would
+# be the largest hole in the cooldown guarantee. The lockfile's `BUNDLED WITH`
+# governs the version (ruby/setup-ruby installs it); bumping Bundler is a
+# deliberate, reviewed change to that line, never an automatic weekly one.
+# (Requires the app's pinned Bundler to be >= 4.0.13 for cooldown support;
+# the `cooldown:` source option fails loudly otherwise.)
 echo -e "${YELLOW}Resolving fresh lockfile (cooldown enforced by Bundler)...${NC}"
 rm Gemfile.lock
 bundle lock --add-checksums
