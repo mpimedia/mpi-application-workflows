@@ -85,49 +85,57 @@ trap on_error ERR
 # --- Record gems held back by Gemfile comments (never touched) ---
 SKIPPED_GEMS="$(ruby "$GEMFILE_EDIT" comments Gemfile)"
 
-# --- Preserve the lockfile's platform list (a fresh lock would lose it) ---
-LOCK_PLATFORMS="$(ruby "$GEMFILE_EDIT" platforms Gemfile.lock)"
-
-# --- Unpin -> fresh resolve under cooldown -> repin with floor ---
-echo -e "${YELLOW}Stripping exact pins from uncommented gems...${NC}"
+# Phase 1 — discover target versions under the cooldown.
+#
+# A fresh `bundle lock` (no existing lockfile) resolves cleanly under the
+# cooldown, whereas `bundle update --all` / `bundle lock --update` FAIL when a
+# currently-locked version is younger than the cooldown window (Bundler hides
+# in-window versions from resolution, even ones already in the lockfile). This
+# throwaway lock is used ONLY to learn the target versions — it is not the
+# lockfile we ship. Regenerating from scratch would de-pin the DEPENDENCIES
+# section and drop platform-specific gem variants locked on other OSes
+# (e.g. arm64-darwin builds resolved on a developer's Mac), so the real
+# lockfile is updated in place in Phase 3 instead.
+#
+# Bundler itself is deliberately NOT auto-updated: `gem install bundler` /
+# `bundle update --bundler` bypass the cooldown and Bundler runs on every
+# install. The lockfile's `BUNDLED WITH` governs the version (ruby/setup-ruby
+# installs it); bumping it is a deliberate, reviewed change. Apps must pin
+# Bundler >= 4.0.13 for cooldown support (the source option errors otherwise).
+echo -e "${YELLOW}Discovering target versions under the cooldown...${NC}"
 ruby "$GEMFILE_EDIT" unpin Gemfile
-
-# Bundler itself is deliberately NOT auto-updated here. `gem install bundler`
-# and `bundle update --bundler` fetch the newest Bundler outside the Gemfile
-# cooldown, and since Bundler executes on every `bundle install`, that would
-# be the largest hole in the cooldown guarantee. The lockfile's `BUNDLED WITH`
-# governs the version (ruby/setup-ruby installs it); bumping Bundler is a
-# deliberate, reviewed change to that line, never an automatic weekly one.
-# (Requires the app's pinned Bundler to be >= 4.0.13 for cooldown support;
-# the `cooldown:` source option fails loudly otherwise.)
-echo -e "${YELLOW}Resolving fresh lockfile (cooldown enforced by Bundler)...${NC}"
 rm Gemfile.lock
 bundle lock --add-checksums
+TARGET_LOCK="$(mktemp)"
+cp Gemfile.lock "$TARGET_LOCK"
 
-echo -e "${YELLOW}Restoring lockfile platforms...${NC}"
-ADD_PLATFORM_ARGS=()
-while IFS= read -r PLATFORM; do
-  [ -z "$PLATFORM" ] && continue
-  ADD_PLATFORM_ARGS+=("$PLATFORM")
-done <<< "$LOCK_PLATFORMS"
-if [ ${#ADD_PLATFORM_ARGS[@]} -gt 0 ]; then
-  bundle lock --add-checksums --add-platform "${ADD_PLATFORM_ARGS[@]}"
-fi
+# Phase 2 — re-pin the Gemfile to the resolved targets, never below the version
+# already locked (an in-window locked version stays put rather than rolling
+# back to an older cooldown-eligible release).
+echo -e "${YELLOW}Re-pinning Gemfile to resolved versions (never downgrading)...${NC}"
+FLOORED_GEMS="$(ruby "$GEMFILE_EDIT" repin "$ORIG_GEMFILE" "$TARGET_LOCK" Gemfile --floor "$ORIG_LOCK")"
 
-echo -e "${YELLOW}Re-pinning Gemfile from resolved lockfile versions (never below the previously locked version)...${NC}"
-FLOORED_GEMS="$(ruby "$GEMFILE_EDIT" repin "$ORIG_GEMFILE" Gemfile.lock Gemfile --floor "$ORIG_LOCK")"
-
+# Phase 3 — apply the new pins to the ORIGINAL lockfile. Restoring the original
+# lock first means only the gems whose pins actually changed get re-resolved;
+# every other gem keeps its exact lockfile entry, including platform-specific
+# variants, and the DEPENDENCIES section is regenerated to match the re-pinned
+# Gemfile. This is what keeps the lockfile consistent and cross-platform.
+echo -e "${YELLOW}Applying updates to the existing lockfile...${NC}"
+cp "$ORIG_LOCK" Gemfile.lock
 if [ -n "$FLOORED_GEMS" ]; then
-  # One or more gems are pinned above what the cooldown-filtered resolution
-  # produced (their already-locked versions are inside the cooldown window).
-  # Sync the lockfile to those pins with the cooldown disabled: every direct
-  # gem is exact-pinned at this point, so this re-admits only versions the
-  # app already ships — it cannot select anything new.
   echo -e "${YELLOW}Keeping already-locked in-window versions (no downgrades):${NC}"
   echo "$FLOORED_GEMS" | awk -F'\t' '{ printf "  - %s: resolver chose %s, keeping locked %s\n", $2, $3, $4 }'
-  # `bundle lock` has no --cooldown flag; the env var has the same precedence.
-  BUNDLE_COOLDOWN=0 bundle lock --add-checksums
 fi
+# Realize the pins with the cooldown DISABLED. Every direct gem is now exact-
+# pinned to a version that was already vetted under the cooldown in Phase 1
+# (or floored to a version the app already ships), so disabling it here adds
+# nothing new — it only avoids a re-resolution flake when a target sits exactly
+# on the cooldown boundary (Phase 1 would admit it; a second cooldown pass
+# seconds later might not). `bundle install` (not `bundle lock`) because only
+# install reliably applies a changed pin, and it is exactly what the
+# idempotence guard and developers run. (`bundle` has no --cooldown flag; the
+# env var has the same precedence.)
+BUNDLE_COOLDOWN=0 bundle install >/dev/null
 
 UPDATED_GEMS="$(ruby "$GEMFILE_EDIT" lockdiff "$ORIG_LOCK" Gemfile.lock)"
 
@@ -136,6 +144,43 @@ if git diff --quiet Gemfile Gemfile.lock 2>/dev/null; then
   echo -e "${GREEN}✓ No gem updates available within the cooldown window.${NC}"
   restore_originals
   exit 0
+fi
+
+# Phase 4 — idempotence guard. The generated lockfile MUST be a fixed point of
+# a plain (cooldown-respecting) `bundle install`; otherwise frozen CI/production
+# installs would fail and every developer's `bundle install` would churn it.
+# Compare the lockfile immediately before and after one more install — NOT
+# against HEAD, which legitimately differs by the updates we just made. Any
+# change here means the resolve left the lockfile inconsistent (e.g. an
+# in-window transitive that a cooldown install would reject) — restore and
+# abort so the workflow's failure notification fires instead of opening a
+# broken PR.
+echo -e "${YELLOW}Verifying the lockfile is idempotent...${NC}"
+GUARD_LOCK="$(mktemp)"
+cp Gemfile.lock "$GUARD_LOCK"
+bundle install >/dev/null
+if ! diff -q "$GUARD_LOCK" Gemfile.lock >/dev/null 2>&1; then
+  echo -e "${RED}Lockfile is not idempotent — a follow-up 'bundle install' changed it:${NC}"
+  diff "$GUARD_LOCK" Gemfile.lock | head -60
+  restore_originals
+  exit 1
+fi
+
+# Phase 5 — platform-variant guard. A precompiled variant (e.g. arm64-darwin)
+# present in the original lockfile must still be present, or that platform's
+# `bundle install --frozen` would break. Updating a gem in place preserves
+# unchanged gems' variants, but re-resolving a *changed* platform gem on a
+# Linux runner can silently drop its non-Linux variants — the idempotence
+# guard can't see that (a Linux install is self-consistent without them).
+echo -e "${YELLOW}Verifying platform variants are preserved...${NC}"
+MISSING_PLATFORMS="$(comm -23 \
+  <(ruby "$GEMFILE_EDIT" platform_variants "$ORIG_LOCK") \
+  <(ruby "$GEMFILE_EDIT" platform_variants Gemfile.lock))"
+if [ -n "$MISSING_PLATFORMS" ]; then
+  echo -e "${RED}Lockfile dropped platform variants that were present before:${NC}"
+  echo "$MISSING_PLATFORMS" | awk '{ print "  - " $0 }'
+  restore_originals
+  exit 1
 fi
 
 # --- Build PR content ---
