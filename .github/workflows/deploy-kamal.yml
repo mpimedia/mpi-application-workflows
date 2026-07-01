@@ -60,7 +60,7 @@ jobs:
           chmod 600 ~/.ssh/config
 
       - name: Install 1Password CLI
-        uses: 1password/install-cli-action@v2
+        uses: 1password/install-cli-action@v4
 
       - name: Build and deploy to staging
         if: inputs.environment == 'staging'
