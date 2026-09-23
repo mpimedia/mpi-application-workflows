@@ -28,11 +28,43 @@ Full CI pipeline for Rails applications including:
 | `importmap` | boolean | `true` | Run importmap audit for projects using importmap-rails |
 | `jsbundling` | boolean | `false` | Run yarn npm audit for projects using jsbundling-rails (esbuild/webpack) |
 | `rspec_options` | string | `''` | Additional options passed to the rspec command |
+| `test_shards` | number | `1` | Split the Elasticsearch test job across this many runners (see Sharded tests) |
+| `runtime_log` | string | `''` | Committed `parallel_tests` runtime log that balances shards by runtime; empty balances by file size |
+| `coverage_collate_command` | string | `'bin/collate-coverage'` | Command the `coverage` job runs to verify and merge shard coverage |
 
 When `elasticsearch: true`, the workflow:
 - Reads the Elasticsearch version from `.tool-versions`
 - Starts Elasticsearch before running tests
 - Sets `ELASTICSEARCH_URL` environment variable
+
+#### Sharded tests (`test_shards` > 1)
+
+For Elasticsearch apps only. `test_with_elasticsearch_sharded` replaces the
+single `test_with_elasticsearch` job, and a `coverage` job runs after it:
+
+- **Shards.** Each of the `test_shards` runners has its own Postgres and an
+  Elasticsearch service container, and runs one group from
+  `parallel_rspec -n <test_shards> --only-group <n>`. Groups are balanced by
+  `runtime_log` when set, otherwise by file size. Checks are named
+  `test_with_elasticsearch (n/N)`.
+- **Coverage.** A shard covers only part of the suite, so the app must skip
+  its coverage minimum inside a shard (`TEST_SHARD` is set) and write
+  `coverage/shard-<n>.json` listing the spec files it ran. The `coverage` job
+  downloads every shard's `coverage/.resultset.json` and manifest into
+  `coverage-shards/` and runs `coverage_collate_command coverage-shards` with
+  `TEST_SHARDS` set. That command must refuse a missing shard or a spec file
+  that ran on no shard or on two, then merge with `SimpleCov.collate` and
+  enforce the minimum. The Markaz implementation is the reference:
+  `spec/simplecov_profile.rb`, `spec/support/coverage_collation.rb`,
+  `bin/collate-coverage`.
+- **Runtimes.** Each shard records its file runtimes, and the `coverage` job
+  publishes them combined as the `test-runtimes` artifact, ready to refresh
+  the app's committed `runtime_log`.
+- **App requirements:** `parallel_tests` in the Gemfile's test group, and no
+  path filters in `rspec_options`, because `parallel_tests` chooses the files.
+
+A non-Elasticsearch app that sets `test_shards` still runs its unsharded
+`test` job; no combination of inputs skips the suite.
 
 ### update-gems.yml
 

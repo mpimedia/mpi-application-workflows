@@ -38,6 +38,24 @@ on:
         required: false
         default: ''
         type: string
+      test_shards:
+        description: >-
+          Split the Elasticsearch test job across this many runners (1 = no sharding).
+          Sharding requires the app to provide `parallel_tests`, a shard manifest and
+          `coverage_collate_command`; see README.
+        required: false
+        default: 1
+        type: number
+      runtime_log:
+        description: 'Committed parallel_tests runtime log used to balance shards by runtime (empty = balance by file size)'
+        required: false
+        default: ''
+        type: string
+      coverage_collate_command:
+        description: 'Command the coverage job runs to verify and merge shard coverage and enforce the minimum'
+        required: false
+        default: 'bin/collate-coverage'
+        type: string
 
 jobs:
   # Read .tool-versions from the calling repo to extract version numbers
@@ -49,7 +67,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       postgres: ${{ steps.pg_resolve.outputs.version }}
+      elasticsearch: ${{ steps.versions.outputs.elasticsearch }}
+      shard_matrix: ${{ steps.shards.outputs.matrix }}
     steps:
+      - name: Build shard matrix
+        id: shards
+        env:
+          TEST_SHARDS: ${{ inputs.test_shards }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TEST_SHARDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::test_shards must be a positive integer, got '${TEST_SHARDS}'"
+            exit 1
+          fi
+          echo "matrix=$(jq -cn --argjson n "$TEST_SHARDS" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@v6
 
@@ -245,9 +277,9 @@ jobs:
       - name: Run tests
         run: bundle exec rspec --format RSpec::Github::Formatter --format progress ${{ inputs.rspec_options }}
 
-  # Test job with Elasticsearch
+  # Test job with Elasticsearch (unsharded; test_with_elasticsearch_sharded replaces it when test_shards > 1)
   test_with_elasticsearch:
-    if: ${{ inputs.elasticsearch == true }}
+    if: ${{ inputs.elasticsearch == true && inputs.test_shards <= 1 }}
     needs: read_versions
     runs-on: ubuntu-latest
 
@@ -316,10 +348,195 @@ jobs:
       - name: Run tests
         run: bundle exec rspec --format RSpec::Github::Formatter --format progress ${{ inputs.rspec_options }}
 
+  # Sharded test job with Elasticsearch (test_shards > 1). Each shard is its own runner
+  # with its own Postgres and Elasticsearch, so shards share no state. parallel_tests
+  # splits the spec files into test_shards groups (by recorded runtime when runtime_log
+  # is set) and each shard runs exactly one group. A shard does NOT enforce the coverage
+  # minimum -- it covers only part of the suite -- so the `coverage` job below merges
+  # every shard and enforces it once. The app writes a manifest of the files each shard
+  # ran (coverage/shard-N.json) so the merge can prove no spec file was skipped.
+  #
+  # Sharding covers Elasticsearch apps only: the unsharded `test` job above still runs
+  # for non-Elasticsearch apps whatever test_shards says, so no input combination can
+  # skip the test suite entirely.
+  test_with_elasticsearch_sharded:
+    name: test_with_elasticsearch (${{ matrix.shard }}/${{ inputs.test_shards }})
+    if: ${{ inputs.elasticsearch == true && inputs.test_shards > 1 }}
+    needs: read_versions
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.read_versions.outputs.shard_matrix) }}
+
+    env:
+      BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
+      RAILS_ENV: test
+      ELASTICSEARCH_URL: http://localhost:9200
+      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+
+    services:
+      postgres:
+        image: postgres:${{ needs.read_versions.outputs.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      # A service container starts in parallel with the other containers instead of
+      # being downloaded and installed as a step (ankane/setup-elasticsearch took
+      # 86-108 s per run on Markaz). Readiness is polled from the runner in the
+      # "Wait for Elasticsearch" step rather than with --health-cmd, because the
+      # Elasticsearch image is not guaranteed to ship curl.
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:${{ needs.read_versions.outputs.elasticsearch }}
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: 'false'
+          ES_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read .tool-versions
+        uses: marocchino/tool-versions-action@v1
+        id: versions
+
+      - name: Install libvips
+        if: ${{ inputs.libvips == true }}
+        run: sudo apt-get update && sudo apt-get install -y libvips42
+
+      - name: Install ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+          ruby-version: ${{ steps.versions.outputs.ruby }}
+
+      - name: Install ruby gems
+        run: bundle install
+
+      - name: Install node
+        uses: actions/setup-node@v6
+        with:
+          cache: "yarn"
+          node-version: ${{ steps.versions.outputs.nodejs }}
+
+      - name: Install node packages
+        run: yarn install
+
+      - name: Wait for Elasticsearch
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS "$ELASTICSEARCH_URL/_cluster/health?wait_for_status=yellow&timeout=5s" > /dev/null; then
+              curl -fsS "$ELASTICSEARCH_URL"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Elasticsearch did not become ready at $ELASTICSEARCH_URL"
+          exit 1
+
+      - name: Setup database
+        run: bin/rails db:create db:schema:load
+
+      - name: Prepare test environment
+        run: bin/rails spec:prepare css:build
+
+      - name: Run tests (shard ${{ matrix.shard }} of ${{ inputs.test_shards }})
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+          TEST_SHARDS: ${{ inputs.test_shards }}
+          RUNTIME_LOG: ${{ inputs.runtime_log }}
+          RSPEC_OPTIONS: ${{ inputs.rspec_options }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          group_by=(--group-by filesize)
+          if [ -n "$RUNTIME_LOG" ]; then
+            if [ ! -f "$RUNTIME_LOG" ]; then
+              echo "::error::runtime_log '${RUNTIME_LOG}' does not exist"
+              exit 1
+            fi
+            group_by=(--group-by runtime --runtime-log "$RUNTIME_LOG")
+          fi
+          bundle exec parallel_rspec -n "$TEST_SHARDS" --only-group "$TEST_SHARD" "${group_by[@]}" \
+            --test-options "--format RSpec::Github::Formatter --format progress --format ParallelTests::RSpec::RuntimeLogger --out tmp/runtime-shard-${TEST_SHARD}.txt ${RSPEC_OPTIONS}"
+
+      - name: Upload shard coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          # .resultset.json is a dotfile, which upload-artifact skips by default.
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            coverage/.resultset.json
+            coverage/shard-${{ matrix.shard }}.json
+            tmp/runtime-shard-${{ matrix.shard }}.txt
+
+  # Merges every shard's coverage and enforces the minimum once, through the app's
+  # coverage_collate_command, which must also verify that each shard reported and
+  # that every spec file ran on exactly one shard.
+  coverage:
+    if: ${{ inputs.elasticsearch == true && inputs.test_shards > 1 }}
+    needs: test_with_elasticsearch_sharded
+    runs-on: ubuntu-latest
+
+    env:
+      BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read .tool-versions
+        uses: marocchino/tool-versions-action@v1
+        id: versions
+
+      - name: Install ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+          ruby-version: ${{ steps.versions.outputs.ruby }}
+
+      - name: Download shard coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-shard-*
+          path: coverage-shards
+
+      - name: Merge coverage and enforce the minimum
+        env:
+          TEST_SHARDS: ${{ inputs.test_shards }}
+          COLLATE_COMMAND: ${{ inputs.coverage_collate_command }}
+        run: $COLLATE_COMMAND coverage-shards
+
+      - name: Combine shard runtimes
+        run: |
+          set -euo pipefail
+          cat coverage-shards/coverage-shard-*/tmp/runtime-shard-*.txt | sort > test-runtimes.txt
+          wc -l test-runtimes.txt
+
+      - name: Upload combined runtimes
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-runtimes
+          path: test-runtimes.txt
+
   notify-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
-    needs: [read_versions, scan_ruby, scan_js_importmap, scan_js_jsbundling, lint, test, test_with_elasticsearch]
+    needs: [read_versions, scan_ruby, scan_js_importmap, scan_js_jsbundling, lint, test, test_with_elasticsearch, test_with_elasticsearch_sharded, coverage]
     if: always() && contains(needs.*.result, 'failure')
     steps:
       - name: Send failure notification
@@ -343,6 +560,8 @@ jobs:
           RESULT_LINT: ${{ needs.lint.result }}
           RESULT_TEST: ${{ needs.test.result }}
           RESULT_TEST_ES: ${{ needs.test_with_elasticsearch.result }}
+          RESULT_TEST_ES_SHARDED: ${{ needs.test_with_elasticsearch_sharded.result }}
+          RESULT_COVERAGE: ${{ needs.coverage.result }}
         run: |
           SUBJECT=$(printf '\u274c GitHub Action Failed: %s \u2013 %s' "$REPO" "$WORKFLOW_NAME")
           BODY=$(cat <<BODY_EOF
@@ -360,6 +579,8 @@ jobs:
             lint:                   $RESULT_LINT
             test:                   $RESULT_TEST
             test_with_elasticsearch: $RESULT_TEST_ES
+            test_with_elasticsearch_sharded: $RESULT_TEST_ES_SHARDED
+            coverage:               $RESULT_COVERAGE
 
           View run:  $RUN_URL
           BODY_EOF
