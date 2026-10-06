@@ -56,6 +56,11 @@ on:
         required: false
         default: 'bin/collate-coverage'
         type: string
+      notify_on_failure:
+        description: 'Email a failure notification through Postmark when any job fails'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   # Read .tool-versions from the calling repo to extract version numbers
@@ -537,7 +542,7 @@ jobs:
     name: Notify on Failure
     runs-on: ubuntu-latest
     needs: [read_versions, scan_ruby, scan_js_importmap, scan_js_jsbundling, lint, test, test_with_elasticsearch, test_with_elasticsearch_sharded, coverage]
-    if: always() && contains(needs.*.result, 'failure')
+    if: always() && inputs.notify_on_failure && contains(needs.*.result, 'failure')
     steps:
       - name: Send failure notification
         env:

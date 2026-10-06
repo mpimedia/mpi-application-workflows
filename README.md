@@ -31,6 +31,7 @@ Full CI pipeline for Rails applications including:
 | `test_shards` | number | `1` | Split the Elasticsearch test job across this many runners (see Sharded tests) |
 | `runtime_log` | string | `''` | Committed `parallel_tests` runtime log that balances shards by runtime; empty balances by file size |
 | `coverage_collate_command` | string | `'bin/collate-coverage'` | Command the `coverage` job runs to verify and merge shard coverage |
+| `notify_on_failure` | boolean | `true` | Email a failure notification through Postmark when any job fails; `false` skips the `notify-failure` job |
 
 When `elasticsearch: true`, the workflow:
 - Reads the Elasticsearch version from `.tool-versions`
