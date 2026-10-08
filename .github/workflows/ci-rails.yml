@@ -61,6 +61,13 @@ on:
         required: false
         default: true
         type: boolean
+      runner:
+        description: >-
+          Runner label for every job, e.g. blacksmith-2vcpu-ubuntu-2404. A non-GitHub label
+          needs that provider's GitHub App installed on the calling repo; see README.
+        required: false
+        default: 'ubuntu-latest'
+        type: string
 
 jobs:
   # Read .tool-versions from the calling repo to extract version numbers
@@ -69,7 +76,7 @@ jobs:
   # doesn't exist yet (e.g. released today but not yet built), it falls back to the
   # major version tag, which always resolves to the latest patch release.
   read_versions:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     outputs:
       postgres: ${{ steps.pg_resolve.outputs.version }}
       elasticsearch: ${{ steps.versions.outputs.elasticsearch }}
@@ -113,7 +120,7 @@ jobs:
 
   scan_ruby:
     if: ${{ inputs.security_scan == true }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     env:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
 
@@ -139,7 +146,7 @@ jobs:
 
   scan_js_importmap:
     if: ${{ inputs.security_scan == true && inputs.importmap == true }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     env:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
 
@@ -162,7 +169,7 @@ jobs:
 
   scan_js_jsbundling:
     if: ${{ inputs.security_scan == true && inputs.jsbundling == true }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     steps:
       - name: Checkout repository
@@ -186,7 +193,7 @@ jobs:
 
   lint:
     if: ${{ inputs.lint == true }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     env:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RUBOCOP_CACHE_ROOT: tmp/rubocop
@@ -221,12 +228,11 @@ jobs:
   test:
     if: ${{ inputs.elasticsearch == false }}
     needs: read_versions
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     env:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RAILS_ENV: test
-      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
 
     services:
       postgres:
@@ -286,13 +292,12 @@ jobs:
   test_with_elasticsearch:
     if: ${{ inputs.elasticsearch == true && inputs.test_shards <= 1 }}
     needs: read_versions
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     env:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RAILS_ENV: test
       ELASTICSEARCH_URL: http://localhost:9200
-      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
 
     services:
       postgres:
@@ -368,7 +373,7 @@ jobs:
     name: test_with_elasticsearch (${{ matrix.shard }}/${{ inputs.test_shards }})
     if: ${{ inputs.elasticsearch == true && inputs.test_shards > 1 }}
     needs: read_versions
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     strategy:
       fail-fast: false
@@ -379,7 +384,6 @@ jobs:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RAILS_ENV: test
       ELASTICSEARCH_URL: http://localhost:9200
-      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
 
     services:
       postgres:
@@ -495,7 +499,7 @@ jobs:
   coverage:
     if: ${{ inputs.elasticsearch == true && inputs.test_shards > 1 }}
     needs: test_with_elasticsearch_sharded
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     env:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
@@ -540,7 +544,7 @@ jobs:
 
   notify-failure:
     name: Notify on Failure
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [read_versions, scan_ruby, scan_js_importmap, scan_js_jsbundling, lint, test, test_with_elasticsearch, test_with_elasticsearch_sharded, coverage]
     if: always() && inputs.notify_on_failure && contains(needs.*.result, 'failure')
     steps:
