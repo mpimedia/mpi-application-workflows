@@ -32,6 +32,7 @@ Full CI pipeline for Rails applications including:
 | `runtime_log` | string | `''` | Committed `parallel_tests` runtime log that balances shards by runtime; empty balances by file size |
 | `coverage_collate_command` | string | `'bin/collate-coverage'` | Command the `coverage` job runs to verify and merge shard coverage |
 | `notify_on_failure` | boolean | `true` | Email a failure notification through Postmark when any job fails; `false` skips the `notify-failure` job |
+| `runner` | string | `'ubuntu-latest'` | Runner label for every job (see Runners) |
 
 When `elasticsearch: true`, the workflow:
 - Reads the Elasticsearch version from `.tool-versions`
@@ -66,6 +67,24 @@ single `test_with_elasticsearch` job, and a `coverage` job runs after it:
 
 A non-Elasticsearch app that sets `test_shards` still runs its unsharded
 `test` job; no combination of inputs skips the suite.
+
+#### Runners (`runner`)
+
+Every job runs on the `runner` label, which defaults to GitHub-hosted
+`ubuntu-latest`. To use Blacksmith, set
+`runner: blacksmith-2vcpu-ubuntu-2404`:
+
+- **The calling repo needs the Blacksmith GitHub App installed.** The jobs run
+  in the caller's context, so this repo doesn't need it. Without the app, the
+  jobs wait in the queue indefinitely instead of failing.
+- **Rollback** is per app: set `runner: ubuntu-latest`, or remove the input.
+  Don't remove the `runner` input from this workflow while callers still pass
+  it, because a caller that passes an undefined input fails.
+
+#### Credentials
+
+The test jobs don't set `RAILS_MASTER_KEY`. Tests must not depend on
+encrypted Rails credentials: use test-only values in code or specs instead.
 
 ### update-gems.yml
 
