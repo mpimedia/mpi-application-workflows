@@ -117,6 +117,8 @@ jobs:
           # the registry manifest lookup, so the result never rests on the API alone.
           tag_exists() {
             local code
+            # An empty tag would ask for .../tags/, which answers 200.
+            [ -n "$1" ] || return 1
             code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
               "https://hub.docker.com/v2/namespaces/library/repositories/postgres/tags/$1" || true)
             case "$code" in
