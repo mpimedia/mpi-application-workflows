@@ -75,6 +75,9 @@ jobs:
   # For Postgres, the exact version is checked against Docker Hub. If the image
   # doesn't exist yet (e.g. released today but not yet built), it falls back to the
   # major version tag, which always resolves to the latest patch release.
+  # Every test job waits on this job, so it stays short: it checks out .tool-versions
+  # alone, and asks Docker Hub's tag API (~0.2 s) before `docker manifest inspect`
+  # (~13 s on Blacksmith), which stays as the fallback (mpimedia/markaz ISS#1944).
   read_versions:
     runs-on: ${{ inputs.runner }}
     outputs:
@@ -96,6 +99,9 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          sparse-checkout: .tool-versions
+          sparse-checkout-cone-mode: false
 
       - name: Read .tool-versions
         uses: marocchino/tool-versions-action@v2
@@ -106,10 +112,25 @@ jobs:
         run: |
           set -euo pipefail
           EXACT="${{ steps.versions.outputs.postgres }}"
-          if docker manifest inspect "postgres:${EXACT}" > /dev/null 2>&1; then
+          # Succeeds when postgres:$1 exists. Docker Hub's tag API answers 200 or 404 in
+          # well under a second; any other answer (a rate limit, an outage) falls back to
+          # the registry manifest lookup, so the result never rests on the API alone.
+          tag_exists() {
+            local code
+            # An empty tag would ask for .../tags/, which answers 200.
+            [ -n "$1" ] || return 1
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+              "https://hub.docker.com/v2/namespaces/library/repositories/postgres/tags/$1" || true)
+            case "$code" in
+              200) return 0 ;;
+              404) return 1 ;;
+              *) docker manifest inspect "postgres:$1" > /dev/null 2>&1 ;;
+            esac
+          }
+          if tag_exists "${EXACT}"; then
             echo "version=${EXACT}" >> "$GITHUB_OUTPUT"
             echo "Using exact version: postgres:${EXACT}"
-          elif docker manifest inspect "postgres:$(echo "${EXACT}" | cut -d. -f1)" > /dev/null 2>&1; then
+          elif tag_exists "$(echo "${EXACT}" | cut -d. -f1)"; then
             MAJOR=$(echo "${EXACT}" | cut -d. -f1)
             echo "version=${MAJOR}" >> "$GITHUB_OUTPUT"
             echo "::warning::postgres:${EXACT} not yet available on Docker Hub, falling back to postgres:${MAJOR}"
