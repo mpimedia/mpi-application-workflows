@@ -255,6 +255,9 @@ jobs:
       BUNDLE_GITHUB__COM: x-access-token:${{ github.token }}
       RAILS_ENV: test
 
+    # Postgres is ready about 3 s after it starts, but the runner holds every step until
+    # the health check passes. A 10 s interval cost about 13 s per job; a 1 s interval
+    # with 90 retries keeps about the old 100 s budget for a slow start (mpimedia/markaz ISS#1944).
     services:
       postgres:
         image: postgres:${{ needs.read_versions.outputs.postgres }}
@@ -266,9 +269,9 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 90
 
     steps:
       - name: Checkout repository
@@ -278,9 +281,11 @@ jobs:
         uses: marocchino/tool-versions-action@v2
         id: versions
 
+      # The runner image ships current package lists, so `apt-get update` (about 10 s) runs
+      # only when the install fails without it.
       - name: Install libvips
         if: ${{ inputs.libvips == true }}
-        run: sudo apt-get update && sudo apt-get install -y libvips42
+        run: sudo apt-get install -y libvips42 || { sudo apt-get update && sudo apt-get install -y libvips42; }
 
       - name: Install ruby
         uses: ruby/setup-ruby@v1
@@ -331,9 +336,9 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 90
 
     steps:
       - name: Checkout repository
@@ -350,7 +355,7 @@ jobs:
 
       - name: Install libvips
         if: ${{ inputs.libvips == true }}
-        run: sudo apt-get update && sudo apt-get install -y libvips42
+        run: sudo apt-get install -y libvips42 || { sudo apt-get update && sudo apt-get install -y libvips42; }
 
       - name: Install ruby
         uses: ruby/setup-ruby@v1
@@ -417,9 +422,9 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 90
       # A service container starts in parallel with the other containers instead of
       # being downloaded and installed as a step (ankane/setup-elasticsearch took
       # 86-108 s per run on Markaz). Readiness is polled from the runner in the
@@ -444,7 +449,7 @@ jobs:
 
       - name: Install libvips
         if: ${{ inputs.libvips == true }}
-        run: sudo apt-get update && sudo apt-get install -y libvips42
+        run: sudo apt-get install -y libvips42 || { sudo apt-get update && sudo apt-get install -y libvips42; }
 
       - name: Install ruby
         uses: ruby/setup-ruby@v1
@@ -464,6 +469,15 @@ jobs:
       - name: Install node packages
         run: yarn install
 
+      - name: Setup database
+        run: bin/rails db:create db:schema:load
+
+      - name: Prepare test environment
+        run: bin/rails spec:prepare css:build
+
+      # Elasticsearch takes about 45 s to start on a 2 vCPU runner, longer than the steps
+      # above. Waiting here lets the database setup and asset build run meanwhile; neither
+      # needs Elasticsearch (mpimedia/markaz ISS#1944).
       - name: Wait for Elasticsearch
         run: |
           for _ in $(seq 1 60); do
@@ -475,12 +489,6 @@ jobs:
           done
           echo "::error::Elasticsearch did not become ready at $ELASTICSEARCH_URL"
           exit 1
-
-      - name: Setup database
-        run: bin/rails db:create db:schema:load
-
-      - name: Prepare test environment
-        run: bin/rails spec:prepare css:build
 
       - name: Run tests (shard ${{ matrix.shard }} of ${{ inputs.test_shards }})
         env:
