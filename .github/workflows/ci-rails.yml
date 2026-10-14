@@ -256,8 +256,12 @@ jobs:
       RAILS_ENV: test
 
     # Postgres is ready about 3 s after it starts, but the runner holds every step until
-    # the health check passes. A 10 s interval cost about 13 s per job; a 1 s interval
-    # with 90 retries keeps about the old 100 s budget for a slow start (mpimedia/markaz ISS#1944).
+    # the health check passes, and a 10 s interval cost about 13 s per job. During the
+    # 90 s start period Docker probes every 1 s and failures don't count; after it, the
+    # check is every 10 s, so it adds no load to the tests. Start-interval needs Docker
+    # Engine 25+ (API 1.44); Blacksmith runners report API 1.48. `-h 127.0.0.1`
+    # probes over TCP, which the image's temporary init server doesn't listen on, so the
+    # check can't pass before the real server is up (mpimedia/markaz ISS#1944).
     services:
       postgres:
         image: postgres:${{ needs.read_versions.outputs.postgres }}
@@ -268,10 +272,12 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 1s
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-start-period 90s
+          --health-start-interval 1s
           --health-timeout 5s
-          --health-retries 90
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -281,8 +287,9 @@ jobs:
         uses: marocchino/tool-versions-action@v2
         id: versions
 
-      # The runner image ships current package lists, so `apt-get update` (about 10 s) runs
-      # only when the install fails without it.
+      # `apt-get update` took 2-10 s per job on Blacksmith (mpimedia/markaz ISS#1944), and the
+      # runner image's package lists are usually enough, so it runs only when the install
+      # fails without it.
       - name: Install libvips
         if: ${{ inputs.libvips == true }}
         run: sudo apt-get install -y libvips42 || { sudo apt-get update && sudo apt-get install -y libvips42; }
@@ -335,10 +342,12 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 1s
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-start-period 90s
+          --health-start-interval 1s
           --health-timeout 5s
-          --health-retries 90
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -421,10 +430,12 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 1s
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-start-period 90s
+          --health-start-interval 1s
           --health-timeout 5s
-          --health-retries 90
+          --health-retries 10
       # A service container starts in parallel with the other containers instead of
       # being downloaded and installed as a step (ankane/setup-elasticsearch took
       # 86-108 s per run on Markaz). Readiness is polled from the runner in the
@@ -475,9 +486,10 @@ jobs:
       - name: Prepare test environment
         run: bin/rails spec:prepare css:build
 
-      # Elasticsearch takes about 45 s to start on a 2 vCPU runner, longer than the steps
-      # above. Waiting here lets the database setup and asset build run meanwhile; neither
-      # needs Elasticsearch (mpimedia/markaz ISS#1944).
+      # Elasticsearch took 44 s from container start to "started" on a 2 vCPU Blacksmith
+      # runner (mpimedia/markaz run 38617579256, shard 2). Waiting here, after the database
+      # setup and asset build, keeps it off the critical path now that the containers start
+      # sooner; neither step needs Elasticsearch (mpimedia/markaz ISS#1944).
       - name: Wait for Elasticsearch
         run: |
           for _ in $(seq 1 60); do
