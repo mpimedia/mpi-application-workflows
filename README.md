@@ -102,6 +102,7 @@ Automated Ruby gem updates (apps schedule it weekly, Monday mornings):
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dry_run` | boolean | `false` | Compute and print the would-be update PR without creating a branch, commit, or PR |
+| `runner` | string | `'ubuntu-latest'` | Runner label for every job, e.g. `ubuntu-26.04` to test a new image before `ubuntu-latest` moves |
 
 ### update-packages.yml
 
@@ -116,6 +117,7 @@ Automated Node.js package updates (apps schedule it weekly, Monday mornings):
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dry_run` | boolean | `false` | Compute and print the would-be update PR without creating a branch, commit, or PR |
+| `runner` | string | `'ubuntu-latest'` | Runner label for every job, e.g. `ubuntu-26.04` to test a new image before `ubuntu-latest` moves |
 
 ### lint.yml (this repository's own CI)
 
@@ -158,6 +160,12 @@ Migration index checking:
 - Runs on PRs that modify migrations
 - Ensures all foreign keys have indexes
 
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `runner` | string | `'ubuntu-latest'` | Runner label for every job, e.g. `ubuntu-26.04` to test a new image before `ubuntu-latest` moves |
+
 ### deploy-kamal.yml
 
 Deployment via Kamal:
@@ -175,6 +183,7 @@ Deployment via Kamal:
 |-------|------|---------|-------------|
 | `environment` | string | *(required)* | Target environment (`staging` or `production`) |
 | `tailscale_hosts` | string | `""` | Comma-separated Tailscale host addresses to ping for connectivity verification (e.g. `"host1,host2"`) |
+| `runner` | string | `'ubuntu-latest'` | Runner label for every job, e.g. `ubuntu-26.04` to test a new image before `ubuntu-latest` moves |
 
 ## Usage
 
