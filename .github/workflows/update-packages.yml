@@ -8,10 +8,17 @@ on:
         required: false
         default: false
         type: boolean
+      runner:
+        description: >-
+          Runner label for every job, e.g. ubuntu-26.04. Defaults to ubuntu-latest, which
+          follows GitHub's current Ubuntu image.
+        required: false
+        default: 'ubuntu-latest'
+        type: string
 
 jobs:
   update-packages:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     env:
       GH_TOKEN: ${{ github.token }}
       DRY_RUN: ${{ inputs.dry_run }}
@@ -50,7 +57,7 @@ jobs:
 
   notify-failure:
     name: Notify on Failure
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [update-packages]
     if: failure()
     steps:
