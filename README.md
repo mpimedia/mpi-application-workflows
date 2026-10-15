@@ -28,7 +28,7 @@ Full CI pipeline for Rails applications including:
 | `importmap` | boolean | `true` | Run importmap audit for projects using importmap-rails |
 | `jsbundling` | boolean | `false` | Run yarn npm audit for projects using jsbundling-rails (esbuild/webpack) |
 | `rspec_options` | string | `''` | Additional options passed to the rspec command |
-| `test_shards` | number | `1` | Split the Elasticsearch test job across this many runners (see Sharded tests) |
+| `test_shards` | number | `1` | Split the Elasticsearch test job across this many runners, at most 20 (see Sharded tests) |
 | `runtime_log` | string | `''` | Committed `parallel_tests` runtime log that balances shards by runtime; empty balances by file size |
 | `coverage_collate_command` | string | `'bin/collate-coverage'` | Command the `coverage` job runs to verify and merge shard coverage |
 | `notify_on_failure` | boolean | `true` | Email a failure notification through Postmark when any job fails; `false` skips the `notify-failure` job |
@@ -44,8 +44,9 @@ When `elasticsearch: true`, the workflow:
 For Elasticsearch apps only. `test_with_elasticsearch_sharded` replaces the
 single `test_with_elasticsearch` job, and a `coverage` job runs after it:
 
-- **Shards.** Each of the `test_shards` runners has its own Postgres and an
-  Elasticsearch service container, and runs one group from
+- **Shards.** Each of the `test_shards` runners starts its own Postgres and
+  Elasticsearch containers from `.tool-versions` (it does not wait on
+  `read_versions`), and runs one group from
   `parallel_rspec -n <test_shards> --only-group <n>`. Groups are balanced by
   `runtime_log` when set, otherwise by file size. Checks are named
   `test_with_elasticsearch (n/N)`.
