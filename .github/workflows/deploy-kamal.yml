@@ -38,21 +38,57 @@ jobs:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_DEPLOYMENT_TOKEN }}
 
     steps:
+      # On workflow_run, github.sha is the branch tip, not the commit CI passed on.
+      # Deploy the CI-passed commit, and skip if a newer commit has since landed:
+      # that commit's own CI run triggers its own deploy, so an older commit never
+      # deploys over a newer one.
+      - name: Resolve commit to deploy
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          DEFAULT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "workflow_run" ]; then
+            echo "sha=$DEFAULT_SHA" >> "$GITHUB_OUTPUT"
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TIP_SHA=$(gh api "repos/$REPO/commits/heads/$RUN_HEAD_BRANCH" --jq .sha)
+          echo "sha=$RUN_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$TIP_SHA" = "$RUN_HEAD_SHA" ]; then
+            echo "Deploying $RUN_HEAD_SHA, the commit CI passed on."
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping deploy of $RUN_HEAD_SHA: $RUN_HEAD_BRANCH has moved to $TIP_SHA, whose own CI run will trigger its deploy."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
+        if: steps.target.outputs.deploy == 'true'
         uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.target.outputs.sha }}
 
       - name: Set up correct build driver for Docker
+        if: steps.target.outputs.deploy == 'true'
         uses: docker/setup-buildx-action@v4
 
       - name: Expose GitHub Runtime for cache
+        if: steps.target.outputs.deploy == 'true'
         uses: crazy-max/ghaction-github-runtime@v4
 
       - name: Setup Ruby
+        if: steps.target.outputs.deploy == 'true'
         uses: ruby/setup-ruby@v1
         with:
           bundler-cache: true
 
       - name: Set up Tailscale
+        if: steps.target.outputs.deploy == 'true'
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -61,22 +97,24 @@ jobs:
           ping: ${{ inputs.tailscale_hosts }}
 
       - name: Set up SSH config to accept new Tailscale hosts
+        if: steps.target.outputs.deploy == 'true'
         run: |
           mkdir -p ~/.ssh
           echo "StrictHostKeyChecking accept-new" >> ~/.ssh/config
           chmod 600 ~/.ssh/config
 
       - name: Install 1Password CLI
+        if: steps.target.outputs.deploy == 'true'
         uses: 1password/install-cli-action@v4
 
       - name: Build and deploy to staging
-        if: inputs.environment == 'staging'
+        if: steps.target.outputs.deploy == 'true' && inputs.environment == 'staging'
         run: |
           ./bin/kamal build push --output=docker -d staging
           ./bin/kamal deploy -d staging
 
       - name: Build and deploy to production
-        if: inputs.environment == 'production'
+        if: steps.target.outputs.deploy == 'true' && inputs.environment == 'production'
         run: |
           ./bin/kamal build push --output=docker
           ./bin/kamal deploy
@@ -96,8 +134,8 @@ jobs:
           # interpolated into the script body) to prevent workflow injection.
           WORKFLOW_NAME: ${{ github.workflow }}
           BRANCH_NAME: ${{ github.ref_name }}
-          COMMIT_MSG: ${{ github.event.head_commit.message || 'N/A' }}
-          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || github.event.head_commit.message || 'N/A' }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           RUN_ACTOR: ${{ github.actor }}
           EVENT_NAME: ${{ github.event_name }}
           REPO: ${{ github.repository }}
