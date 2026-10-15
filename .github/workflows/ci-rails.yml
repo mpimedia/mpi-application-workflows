@@ -84,10 +84,8 @@ jobs:
     outputs:
       postgres: ${{ steps.pg_resolve.outputs.version }}
       elasticsearch: ${{ steps.versions.outputs.elasticsearch }}
-      shard_matrix: ${{ steps.shards.outputs.matrix }}
     steps:
-      - name: Build shard matrix
-        id: shards
+      - name: Check test_shards
         env:
           TEST_SHARDS: ${{ inputs.test_shards }}
         run: |
@@ -96,12 +94,12 @@ jobs:
             echo "::error::test_shards must be a positive integer, got '${TEST_SHARDS}'"
             exit 1
           fi
-          # test_with_elasticsearch_sharded looks its matrix up in a fixed table of 20.
+          # Keep in step with the matrix table in test_with_elasticsearch_sharded, which
+          # lists 1 to 20 shards.
           if [ "$TEST_SHARDS" -gt 20 ]; then
             echo "::error::test_shards must be 20 or fewer, got '${TEST_SHARDS}'"
             exit 1
           fi
-          echo "matrix=$(jq -cn --argjson n "$TEST_SHARDS" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -113,8 +111,10 @@ jobs:
         uses: marocchino/tool-versions-action@v2
         id: versions
 
+      # Only the unsharded test jobs use this tag; a sharded run resolves its own.
       - name: Resolve Postgres Docker tag
         id: pg_resolve
+        if: ${{ !(inputs.elasticsearch == true && inputs.test_shards > 1) }}
         run: |
           set -euo pipefail
           EXACT="${{ steps.versions.outputs.postgres }}"
@@ -415,8 +415,8 @@ jobs:
     if: ${{ inputs.elasticsearch == true && inputs.test_shards > 1 }}
     # No `needs: read_versions`: waiting on it delayed every shard by about 20 s (its
     # queue plus its run). The matrix comes from a fixed table indexed by test_shards
-    # (read_versions refuses more than 20), and the shard starts Postgres and
-    # Elasticsearch itself from .tool-versions (mpimedia/markaz ISS#1944).
+    # (read_versions refuses more than 20; keep the two in step), and the shard starts
+    # Postgres and Elasticsearch itself from .tool-versions (mpimedia/markaz ISS#1944).
     runs-on: ${{ inputs.runner }}
 
     strategy:
@@ -439,9 +439,10 @@ jobs:
 
       # Started here rather than as service containers, which would need read_versions.
       # Elasticsearch goes first: it takes about 45 s to start on a 2 vCPU runner and
-      # comes up while the steps below run. Postgres uses the exact .tool-versions tag,
-      # or the major tag when Docker Hub doesn't have the exact one yet, as read_versions
-      # does.
+      # comes up while the steps below run. Each pull is tried 3 times, so one registry
+      # hiccup doesn't fail a shard. Postgres falls back to the major tag only when Docker Hub says
+      # the exact tag doesn't exist yet, as read_versions does; any other failure fails
+      # the shard rather than testing another patch version.
       - name: Start Postgres and Elasticsearch
         env:
           PG_VERSION: ${{ steps.versions.outputs.postgres }}
@@ -452,16 +453,32 @@ jobs:
             echo "::error::.tool-versions must list postgres and elasticsearch, got '${PG_VERSION}' and '${ES_VERSION}'"
             exit 1
           fi
+          pull() {
+            local attempt
+            for attempt in 1 2 3; do
+              docker pull -q "$1" && return 0
+              [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
+            done
+            return 1
+          }
+          es_image="docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION}"
+          pull "$es_image"
           docker run -d --name elasticsearch -p 9200:9200 \
             -e discovery.type=single-node \
             -e xpack.security.enabled=false \
             -e "ES_JAVA_OPTS=-Xms1g -Xmx1g" \
-            "docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION}"
+            "$es_image"
           pg_tag="$PG_VERSION"
-          if ! docker pull -q "postgres:${pg_tag}"; then
+          if ! pull "postgres:${pg_tag}"; then
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+              "https://hub.docker.com/v2/namespaces/library/repositories/postgres/tags/${PG_VERSION}" || true)
+            if [ "$code" != "404" ]; then
+              echo "::error::pull of postgres:${PG_VERSION} failed, and Docker Hub answered ${code} for the tag"
+              exit 1
+            fi
             pg_tag="${PG_VERSION%%.*}"
-            echo "::warning::postgres:${PG_VERSION} not available on Docker Hub, falling back to postgres:${pg_tag}"
-            docker pull -q "postgres:${pg_tag}"
+            echo "::warning::postgres:${PG_VERSION} is not on Docker Hub yet, falling back to postgres:${pg_tag}"
+            pull "postgres:${pg_tag}"
           fi
           docker run -d --name postgres -p 5432:5432 \
             -e POSTGRES_USER=postgres \
@@ -558,12 +575,17 @@ jobs:
             coverage/shard-${{ matrix.shard }}.json
             tmp/runtime-shard-${{ matrix.shard }}.txt
 
-      # Service containers printed their logs at the end of the job; these don't.
+      # Service containers printed their logs and were removed at the end of the job;
+      # these containers need both done here (a self-hosted runner would keep them).
       - name: Container logs
         if: ${{ failure() }}
         run: |
           docker logs postgres || true
           docker logs elasticsearch || true
+
+      - name: Remove containers
+        if: ${{ always() }}
+        run: docker rm -f postgres elasticsearch || true
 
   # Merges every shard's coverage and enforces the minimum once, through the app's
   # coverage_collate_command, which must also verify that each shard reported and
