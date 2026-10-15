@@ -12,6 +12,13 @@ on:
         required: false
         type: string
         default: ""
+      runner:
+        description: >-
+          Runner label for every job, e.g. ubuntu-26.04. Defaults to ubuntu-latest, which
+          follows GitHub's current Ubuntu image.
+        required: false
+        default: 'ubuntu-latest'
+        type: string
 
 permissions:
   contents: read
@@ -20,7 +27,7 @@ permissions:
 jobs:
   deploy:
     environment: ${{ inputs.environment }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     permissions:
       contents: read
@@ -76,7 +83,7 @@ jobs:
 
   notify-failure:
     name: Notify on Failure
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [deploy]
     if: failure()
     steps:
