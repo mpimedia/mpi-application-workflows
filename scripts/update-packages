@@ -11,7 +11,9 @@
 #   DRY_RUN=true   Compute and print the would-be PR, then restore all files.
 #                  Skips the branch guard, commit, push, and PR creation.
 #   UPDATE_PR_DIR  Set by the workflow: write the commit's branch, PR title,
-#                  body and label here and stop. A later step mints the
+#                  body and label here and stop. The workflow exports the
+#                  commit as a patch, and its publish job, on a fresh runner,
+#                  checks it (scripts/apply-update-patch), mints the
 #                  mpi-automation App token and runs scripts/publish-update-pr,
 #                  so the push and PR start CI. Unset (a local run), this
 #                  script runs publish-update-pr itself.
@@ -311,8 +313,8 @@ fi
 git commit -m "$PR_TITLE"
 
 # --- Hand off to publish-update-pr ---
-# In CI the workflow sets UPDATE_PR_DIR and runs publish-update-pr as a later
-# step, with the App token this step never sees. Run locally, publish now with
+# In CI the workflow sets UPDATE_PR_DIR and publishes from a separate job that
+# holds the App token and recomputes the label. Run locally, publish now with
 # the developer's credentials.
 PR_DIR="${UPDATE_PR_DIR:-$(mktemp -d)}"
 mkdir -p "$PR_DIR"

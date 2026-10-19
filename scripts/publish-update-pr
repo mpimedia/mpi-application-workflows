@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# Pushes the branch that scripts/update-gems or scripts/update-packages
-# committed, and opens its PR with the lane label (ISS#41).
+# Pushes the update branch and opens its PR with the lane label (ISS#41).
 #
-# In CI this runs as its own workflow step after the update step, and the
-# mpi-automation App token is minted between the two. The token never shares a
-# step, an environment or a git config with the dependency code that `bundle`
-# and `yarn` fetch and run. Run locally, the update scripts call it directly.
+# In CI this runs in the workflow's publish job, on a fresh runner where no
+# dependency code has run: scripts/apply-update-patch has checked the update
+# job's patch, committed it and recomputed the label into <dir>. The
+# mpi-automation App token exists only in that job. Run locally, the update
+# scripts call this directly with what they wrote.
 #
 # Usage: publish-update-pr <dir>
-#   <dir> holds what the update script wrote: branch, title, body, label
-#   (may be empty) and new_branch (true|false). No <dir>/branch means the
-#   update script found nothing to commit; this exits 0.
+#   <dir> holds branch, title, body, label (may be empty) and new_branch
+#   (true|false). No <dir>/branch means there was nothing to commit; this
+#   exits 0.
 #
 # Environment:
 #   GH_TOKEN   Token for the push and `gh pr create`. When set, git sends it in
@@ -42,8 +42,9 @@ PR_BODY="$(cat "$PR_DIR/body")"
 LANE_LABEL="$(cat "$PR_DIR/label")"
 CREATE_NEW_BRANCH="$(cat "$PR_DIR/new_branch")"
 
-# The update step ran dependency install scripts in this checkout, so its git
-# hooks are not trusted: every git call here runs with hooks disabled.
+# Run locally, the update script has just run dependency install scripts in
+# this checkout, so its git hooks are not trusted: every git call here runs
+# with hooks disabled.
 GIT=(git -c core.hooksPath=/dev/null)
 
 if [ -n "${GIT_USER_NAME:-}" ] && [ -n "${GIT_USER_EMAIL:-}" ]; then
@@ -88,8 +89,7 @@ fi
 echo -e "${YELLOW}Creating pull request...${NC}"
 PR_ARGS=()
 [ -n "$LANE_LABEL" ] && PR_ARGS=(--label "$LANE_LABEL")
-# In CI, name the repo rather than letting gh read it from the checkout's
-# git remotes, which the update step could have rewritten.
+# In CI, name the repo rather than letting gh infer it from git remotes.
 [ -n "${GITHUB_REPOSITORY:-}" ] && PR_ARGS+=(--repo "$GITHUB_REPOSITORY")
 gh pr create \
   --title "$PR_TITLE" \

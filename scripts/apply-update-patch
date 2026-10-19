@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#
+# Applies the update job's patch in the publish job, and decides everything
+# the PR needs from trusted inputs (ISS#41).
+#
+# The update job runs code that `bundle` and `yarn` fetch, so everything it
+# hands over is untrusted: the patch, the branch name, the title and the body.
+# This script runs on a fresh runner, before the App token exists, and:
+#
+#   1. Checks the branch name and title against the shape the update scripts
+#      produce, and the branch against the run's ref.
+#   2. Applies the patch to the index only (applying runs no code, and nothing
+#      reaches the working tree, where this script and its helpers live) and
+#      fails unless every path is a dependency file of this kind and a regular
+#      file.
+#   3. Commits it on the branch with the checked title as its message, then
+#      brings the working tree in line.
+#   4. Recomputes the lane label from the commit and the app's own
+#      config/risky_paths.yml, never from the update job's label.
+#
+# A body from the update job is passed through as is: a person reads it.
+#
+# Usage: apply-update-patch <gems|packages> <in-dir> <out-dir>
+#   <in-dir>   the update job's artifact: update.patch, branch, title, body,
+#              new_branch
+#   <out-dir>  written for publish-update-pr: branch, title, body, label,
+#              new_branch
+#
+# Environment:
+#   GITHUB_REF_NAME   The branch the run checked out (main, or an existing
+#                     chore/update-<kind>-* branch).
+
+set -euo pipefail
+
+KIND="${1:?usage: apply-update-patch <gems|packages> <in-dir> <out-dir>}"
+IN_DIR="${2:?usage: apply-update-patch <gems|packages> <in-dir> <out-dir>}"
+OUT_DIR="${3:?usage: apply-update-patch <gems|packages> <in-dir> <out-dir>}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RISK_LANE="$SCRIPT_DIR/lib/risk_lane.rb"
+GEMFILE_EDIT="$SCRIPT_DIR/lib/gemfile_edit.rb"
+YARN_LOCK_NAMES="$SCRIPT_DIR/lib/yarn_lock_names.rb"
+
+fail() {
+  echo "::error title=Update patch rejected::$1"
+  exit 1
+}
+
+case "$KIND" in
+  gems)
+    TITLE_PATTERN='^chore: Update Ruby gems \([0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+    # Exactly the files scripts/update-gems stages.
+    allowed_path() { [ "$1" = Gemfile ] || [ "$1" = Gemfile.lock ]; }
+    ;;
+  packages)
+    TITLE_PATTERN='^chore: Update npm packages \([0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+    # Exactly the paths scripts/update-packages stages (its YARN_PATHS).
+    allowed_path() {
+      case "$1" in
+        package.json | yarn.lock | .yarnrc.yml | .pnp.cjs | .pnp.loader.mjs | .yarn/*) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+    ;;
+  *)
+    fail "unknown kind '$KIND' (expected gems or packages)"
+    ;;
+esac
+
+BRANCH_PATTERN="^chore/update-${KIND}-[0-9A-Za-z-]+$"
+
+# --- 1. Branch, title and branch mode ---
+BRANCH_NAME="$(cat "$IN_DIR/branch")"
+PR_TITLE="$(cat "$IN_DIR/title")"
+CREATE_NEW_BRANCH="$(cat "$IN_DIR/new_branch")"
+REF_NAME="${GITHUB_REF_NAME:?GITHUB_REF_NAME must be set}"
+
+[[ "$BRANCH_NAME" =~ $BRANCH_PATTERN ]] || fail "branch '$BRANCH_NAME' is not chore/update-${KIND}-*"
+[[ "$PR_TITLE" =~ $TITLE_PATTERN ]] || fail "title is not the update script's"
+case "$CREATE_NEW_BRANCH" in
+  true)
+    [ "$REF_NAME" = main ] || fail "a new update branch is cut only from main, not '$REF_NAME'"
+    ;;
+  false)
+    [ "$BRANCH_NAME" = "$REF_NAME" ] || fail "branch '$BRANCH_NAME' is not the run's branch '$REF_NAME'"
+    ;;
+  *)
+    fail "new_branch must be true or false"
+    ;;
+esac
+
+if [ "$CREATE_NEW_BRANCH" = "true" ]; then
+  git checkout -q -b "$BRANCH_NAME"
+fi
+
+# --- 2. Apply to the index only, and check every path ---
+git apply --cached --binary "$IN_DIR/update.patch"
+
+# --raw: ":<old mode> <new mode> <old sha> <new sha> <status>" NUL "<path>" NUL
+CHANGED=0
+while IFS= read -r -d '' META && IFS= read -r -d '' FILE; do
+  NEW_MODE="$(echo "$META" | awk '{ print $2 }')"
+  allowed_path "$FILE" || fail "the patch changes '$FILE', which is not a ${KIND} dependency file"
+  case "$NEW_MODE" in
+    100644 | 100755 | 000000) ;;
+    *) fail "the patch gives '$FILE' mode $NEW_MODE; only regular files are allowed" ;;
+  esac
+  CHANGED=$((CHANGED + 1))
+done < <(git diff --cached --raw -z --no-renames)
+[ "$CHANGED" -gt 0 ] || fail "the patch changes nothing"
+echo "Patch checked: ${CHANGED} ${KIND} dependency file(s), nothing else."
+
+# --- 3. Commit (publish-update-pr re-authors it as the bot) ---
+git -c core.hooksPath=/dev/null \
+  -c user.name="github-actions[bot]" \
+  -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+  commit -q -m "$PR_TITLE"
+git reset -q --hard
+
+# --- 4. Lane label from the commit ---
+BEFORE="$(mktemp)"
+AFTER="$(mktemp)"
+case "$KIND" in
+  gems)
+    git show HEAD~1:Gemfile.lock > "$BEFORE"
+    git show HEAD:Gemfile.lock > "$AFTER"
+    NEW_NAMES="$(ruby "$GEMFILE_EDIT" lockdiff "$BEFORE" "$AFTER" | awk -F'\t' '$4 == "added" { print $1 }')"
+    ;;
+  packages)
+    git show HEAD~1:yarn.lock > "$BEFORE"
+    git show HEAD:yarn.lock > "$AFTER"
+    # Captured first so a parse failure stops the script.
+    NAMES_BEFORE="$(ruby "$YARN_LOCK_NAMES" "$BEFORE")"
+    NAMES_AFTER="$(ruby "$YARN_LOCK_NAMES" "$AFTER")"
+    NEW_NAMES="$(LC_ALL=C comm -13 <(echo "$NAMES_BEFORE") <(echo "$NAMES_AFTER"))"
+    ;;
+esac
+# Gem and npm names never contain whitespace or glob characters, so word splitting is safe.
+# shellcheck disable=SC2086
+LANE_LABEL="$(git diff --name-only -z HEAD~1 HEAD | ruby "$RISK_LANE" config/risky_paths.yml $NEW_NAMES)"
+echo "Lane label: ${LANE_LABEL:-(none: no config/risky_paths.yml)}"
+
+mkdir -p "$OUT_DIR"
+printf '%s' "$BRANCH_NAME" > "$OUT_DIR/branch"
+printf '%s' "$PR_TITLE" > "$OUT_DIR/title"
+cp "$IN_DIR/body" "$OUT_DIR/body"
+printf '%s' "$LANE_LABEL" > "$OUT_DIR/label"
+printf '%s' "$CREATE_NEW_BRANCH" > "$OUT_DIR/new_branch"

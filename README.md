@@ -133,14 +133,25 @@ the branch starts the app's `ci.yml` and the PR starts `risk-lane-gate`.
   `actions/create-github-app-token`, scoped to the calling repository with
   Contents and Pull requests write. A dry run mints it too, which checks the
   credentials without pushing.
-- **The token never meets dependency code.** The checkout keeps no
-  credentials (`persist-credentials: false`). The update step runs `bundle` or
-  `yarn` and commits locally, then stops. Only after it does the job mint the
-  token. A separate step then runs `scripts/publish-update-pr` from a fresh
-  checkout of this repository: it re-authors the commit, pushes with a
-  one-off auth header and hooks disabled, and runs `gh pr create`. Run
-  locally, the update scripts call `publish-update-pr` themselves with the
-  developer's credentials.
+- **The key and token never share a runner with dependency code.** Each
+  workflow has two jobs:
+  - **The update job** (`update-gems` or `update-packages`) runs `bundle` or
+    `yarn`, which fetch and run code from the registries. It has no secrets,
+    a read-only `GITHUB_TOKEN`, no App action and no stored credentials. It
+    commits locally, exports the commit as a patch and uploads it with the
+    branch name, title and body (artifact `update-pr`, kept one day).
+  - **The publish job** starts on a fresh runner and treats all of that as
+    untrusted. `scripts/apply-update-patch` checks the branch name and title
+    against the update scripts' shapes, applies the patch to the index only,
+    and fails unless every path is a dependency file of that kind
+    (`Gemfile`/`Gemfile.lock`, or `package.json`, `yarn.lock`, `.yarnrc.yml`,
+    `.yarn/`, `.pnp.*`) and a regular file. It then commits, and
+    **recomputes the lane label** from the commit and the app's own
+    `config/risky_paths.yml`. Only then does the job mint the token and run
+    `scripts/publish-update-pr`. That script re-authors the commit, pushes
+    with a one-off auth header and hooks disabled, and runs `gh pr create`.
+  - Run locally, the update scripts call `publish-update-pr` themselves with
+    the developer's credentials.
 - **Credentials:** org variable `MPI_AUTOMATION_CLIENT_ID` and org secret
   `MPI_AUTOMATION_PRIVATE_KEY`, both visible to the calling repository. The
   caller must pass `secrets: inherit` (the variable needs nothing: called
@@ -167,6 +178,7 @@ Runs on every push to this repository:
 - Fixture tests for the Gemfile pin-editing library (`ruby scripts/test/gemfile_edit_test.rb`)
 - Tests for the lane-label matcher (`ruby scripts/test/risk_lane_test.rb`)
 - Tests for the `yarn.lock` name reader (`ruby scripts/test/yarn_lock_names_test.rb`)
+- Tests for the publish job's patch check (`ruby scripts/test/apply_update_patch_test.rb`)
 
 ## Centralized Update Scripts (`scripts/`)
 

@@ -12,7 +12,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Run shellcheck on update scripts
-        run: shellcheck scripts/update-gems scripts/update-packages scripts/publish-update-pr
+        run: shellcheck scripts/update-gems scripts/update-packages scripts/publish-update-pr scripts/apply-update-patch
 
   actionlint:
     runs-on: ubuntu-latest
@@ -51,3 +51,6 @@ jobs:
 
       - name: Run yarn_lock_names tests
         run: ruby scripts/test/yarn_lock_names_test.rb
+
+      - name: Run apply-update-patch tests
+        run: ruby scripts/test/apply_update_patch_test.rb
