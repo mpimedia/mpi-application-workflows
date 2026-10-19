@@ -19,20 +19,34 @@ on:
         required: false
         default: 'ubuntu-latest'
         type: string
+      sha:
+        description: >-
+          Full commit SHA to deploy on a manual dispatch, instead of the dispatched branch's tip.
+          It must be reachable from that branch. Empty deploys the tip, as before.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
   packages: write
+  deployments: write
 
 jobs:
   deploy:
-    environment: ${{ inputs.environment }}
+    # GitHub creates an environment's deployment record from github.sha, the branch tip on a
+    # dispatch. When an older commit is named, skip that record and write one for the commit
+    # that actually ships (the "Record deployment" steps below).
+    environment:
+      name: ${{ inputs.environment }}
+      deployment: ${{ inputs.sha == '' || github.event_name == 'workflow_run' }}
     runs-on: ${{ inputs.runner }}
 
     permissions:
       contents: read
       packages: write
       id-token: write
+      deployments: write
 
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_DEPLOYMENT_TOKEN }}
@@ -51,7 +65,25 @@ jobs:
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           DEFAULT_SHA: ${{ github.sha }}
+          REQUESTED_SHA: ${{ inputs.sha }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
+          if [ "$EVENT_NAME" != "workflow_run" ] && [ -n "$REQUESTED_SHA" ]; then
+            if ! printf '%s' "$REQUESTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::sha must be a full 40-character commit SHA."
+              exit 1
+            fi
+            # compare/<sha>...<branch> is "ahead" or "identical" only when the branch contains sha.
+            STATUS=$(gh api "repos/$REPO/compare/$REQUESTED_SHA...$REF_NAME" --jq .status) || STATUS=missing
+            if [ "$STATUS" != "ahead" ] && [ "$STATUS" != "identical" ]; then
+              echo "::error::$REQUESTED_SHA is not on $REF_NAME (compare status: $STATUS)."
+              exit 1
+            fi
+            echo "Deploying $REQUESTED_SHA, named on dispatch; $REF_NAME is at $DEFAULT_SHA."
+            echo "sha=$REQUESTED_SHA" >> "$GITHUB_OUTPUT"
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT_NAME" != "workflow_run" ]; then
             echo "sha=$DEFAULT_SHA" >> "$GITHUB_OUTPUT"
             echo "deploy=true" >> "$GITHUB_OUTPUT"
@@ -66,6 +98,27 @@ jobs:
             echo "::notice::Skipping deploy of $RUN_HEAD_SHA: $RUN_HEAD_BRANCH has moved to $TIP_SHA, whose own CI run will trigger its deploy."
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Record deployment
+        id: record
+        if: inputs.sha != '' && github.event_name != 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.target.outputs.sha }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # required_contexts is empty because CI already gated this commit's staging deploy;
+          # triggered_by keeps who pressed the button, since the record's creator is the bot.
+          ID=$(jq -n --arg ref "$SHA" --arg env "$ENVIRONMENT" --arg actor "$ACTOR" \
+                 '{ref: $ref, environment: $env, auto_merge: false, required_contexts: [],
+                   production_environment: ($env == "production"), payload: {triggered_by: $actor}}' |
+               gh api "repos/$REPO/deployments" --input - --jq .id)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          jq -n --arg url "$RUN_URL" '{state: "in_progress", log_url: $url}' |
+            gh api "repos/$REPO/deployments/$ID/statuses" --input - > /dev/null
 
       - name: Checkout repository
         if: steps.target.outputs.deploy == 'true'
@@ -119,6 +172,19 @@ jobs:
           ./bin/kamal build push --output=docker
           ./bin/kamal deploy
 
+      - name: Finish deployment record
+        if: always() && steps.record.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ID: ${{ steps.record.outputs.id }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          STATE=$([ "$JOB_STATUS" = "success" ] && echo success || echo failure)
+          jq -n --arg state "$STATE" --arg url "$RUN_URL" '{state: $state, log_url: $url}' |
+            gh api "repos/$REPO/deployments/$ID/statuses" --input - > /dev/null
+
   notify-failure:
     name: Notify on Failure
     runs-on: ${{ inputs.runner }}
@@ -135,7 +201,7 @@ jobs:
           WORKFLOW_NAME: ${{ github.workflow }}
           BRANCH_NAME: ${{ github.ref_name }}
           COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || github.event.head_commit.message || 'N/A' }}
-          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
           RUN_ACTOR: ${{ github.actor }}
           EVENT_NAME: ${{ github.event_name }}
           REPO: ${{ github.repository }}
