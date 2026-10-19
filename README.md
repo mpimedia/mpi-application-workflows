@@ -133,6 +133,14 @@ the branch starts the app's `ci.yml` and the PR starts `risk-lane-gate`.
   `actions/create-github-app-token`, scoped to the calling repository with
   Contents and Pull requests write. A dry run mints it too, which checks the
   credentials without pushing.
+- **The token never meets dependency code.** The checkout keeps no
+  credentials (`persist-credentials: false`). The update step runs `bundle` or
+  `yarn` and commits locally, then stops. Only after it does the job mint the
+  token. A separate step then runs `scripts/publish-update-pr` from a fresh
+  checkout of this repository: it re-authors the commit, pushes with a
+  one-off auth header and hooks disabled, and runs `gh pr create`. Run
+  locally, the update scripts call `publish-update-pr` themselves with the
+  developer's credentials.
 - **Credentials:** org variable `MPI_AUTOMATION_CLIENT_ID` and org secret
   `MPI_AUTOMATION_PRIVATE_KEY`, both visible to the calling repository. The
   caller must pass `secrets: inherit` (the variable needs nothing: called

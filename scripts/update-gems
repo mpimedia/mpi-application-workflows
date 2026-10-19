@@ -24,8 +24,11 @@
 # Environment:
 #   DRY_RUN=true   Compute and print the would-be PR, then restore all files.
 #                  Skips the branch guard, commit, push, and PR creation.
-#   GH_TOKEN       Token gh uses to open the PR. The workflow passes the
-#                  mpi-automation App token, so the push and PR start CI.
+#   UPDATE_PR_DIR  Set by the workflow: write the commit's branch, PR title,
+#                  body and label here and stop. A later step mints the
+#                  mpi-automation App token and runs scripts/publish-update-pr,
+#                  so the push and PR start CI. Unset (a local run), this
+#                  script runs publish-update-pr itself.
 #   GIT_USER_NAME, GIT_USER_EMAIL
 #                  Commit identity (default: github-actions[bot]).
 
@@ -58,8 +61,12 @@ if [ "$DRY_RUN" != "true" ]; then
   if [ "$CURRENT_BRANCH" = "main" ]; then
     echo -e "${YELLOW}On main branch, will create new update branch${NC}"
     CREATE_NEW_BRANCH=true
-    echo -e "${YELLOW}Pulling latest changes...${NC}"
-    git pull origin main
+    # In CI the checkout is already the dispatched commit of main, and it
+    # holds no credentials (persist-credentials: false), so only pull locally.
+    if [ -z "${GITHUB_ACTIONS:-}" ]; then
+      echo -e "${YELLOW}Pulling latest changes...${NC}"
+      git pull origin main
+    fi
   elif [[ "$CURRENT_BRANCH" == chore/update-gems-* ]]; then
     echo -e "${YELLOW}On existing update branch: ${CURRENT_BRANCH}${NC}"
     BRANCH_NAME="$CURRENT_BRANCH"
@@ -297,7 +304,7 @@ if [ "$DRY_RUN" = "true" ]; then
   exit 0
 fi
 
-# --- Commit, push, PR ---
+# --- Commit (publish-update-pr pushes and opens the PR) ---
 if [ "$CREATE_NEW_BRANCH" = "true" ]; then
   BRANCH_NAME="chore/update-gems-$(date +%Y-%m-%d-%H%M%S)"
   echo -e "${YELLOW}Creating branch: ${BRANCH_NAME}${NC}"
@@ -310,38 +317,22 @@ git config user.email "$GIT_USER_EMAIL"
 git add Gemfile Gemfile.lock
 git commit -m "$PR_TITLE"
 
-echo -e "${YELLOW}Pushing branch to GitHub...${NC}"
-git push -u origin "$BRANCH_NAME"
+# --- Hand off to publish-update-pr ---
+# In CI the workflow sets UPDATE_PR_DIR and runs publish-update-pr as a later
+# step, with the App token this step never sees. Run locally, publish now with
+# the developer's credentials.
+PR_DIR="${UPDATE_PR_DIR:-$(mktemp -d)}"
+mkdir -p "$PR_DIR"
+printf '%s' "$BRANCH_NAME" > "$PR_DIR/branch"
+printf '%s' "$PR_TITLE" > "$PR_DIR/title"
+printf '%s' "$PR_BODY" > "$PR_DIR/body"
+printf '%s' "$LANE_LABEL" > "$PR_DIR/label"
+printf '%s' "$CREATE_NEW_BRANCH" > "$PR_DIR/new_branch"
 
-if [ "$CREATE_NEW_BRANCH" = "true" ]; then
-  if command -v gh &> /dev/null; then
-    if gh auth status >/dev/null 2>&1 || [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
-      echo -e "${YELLOW}Creating pull request...${NC}"
-      LABEL_ARGS=()
-      [ -n "$LANE_LABEL" ] && LABEL_ARGS=(--label "$LANE_LABEL")
-      gh pr create \
-        --title "$PR_TITLE" \
-        --body "$PR_BODY" \
-        --base main \
-        --head "$BRANCH_NAME" \
-        ${LABEL_ARGS[@]+"${LABEL_ARGS[@]}"}
-      echo -e "${GREEN}✓ Pull request created successfully!${NC}"
-    else
-      echo -e "${YELLOW}Skipping PR creation - authenticate gh or export GH_TOKEN.${NC}"
-      echo -e "${YELLOW}Branch pushed: ${BRANCH_NAME}${NC}"
-    fi
-  else
-    echo -e "${RED}GitHub CLI (gh) not installed. Please create the PR manually.${NC}"
-    echo -e "${YELLOW}Branch pushed: ${BRANCH_NAME}${NC}"
-    echo ""
-    echo "PR Title: $PR_TITLE"
-    echo ""
-    echo "PR Body:"
-    echo "$PR_BODY"
-  fi
+if [ -n "${UPDATE_PR_DIR:-}" ]; then
+  echo -e "${GREEN}✓ Committed ${BRANCH_NAME}; the publish step pushes it and opens the PR.${NC}"
 else
-  echo -e "${GREEN}✓ Changes pushed to existing branch: ${BRANCH_NAME}${NC}"
-  echo -e "${YELLOW}The existing PR will be updated automatically.${NC}"
+  bash "$SCRIPT_DIR/publish-update-pr" "$PR_DIR"
 fi
 
 echo -e "${GREEN}=== Gem update complete! ===${NC}"
