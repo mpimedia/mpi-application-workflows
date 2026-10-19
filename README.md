@@ -95,7 +95,8 @@ Automated Ruby gem updates (apps schedule it weekly, Monday mornings):
   Bundler's resolver never selects versions younger than N days
 - Flow: unpin exact pins → `bundle update --all` → repin from the resolved lockfile
   (gems with a `#` comment in the Gemfile are never touched)
-- Creates a PR listing updated and skipped gems
+- Creates a PR listing updated and skipped gems, with major version bumps flagged at the top
+  (see Updater PRs below)
 
 **Inputs:**
 
@@ -110,7 +111,8 @@ Automated Node.js package updates (apps schedule it weekly, Monday mornings):
 - Runs the centralized `scripts/update-packages` against the calling app's checkout
 - Honors Yarn's `npmMinimalAgeGate` (`.yarnrc.yml`) — `yarn up <pkg>` resolves to the
   newest gate-compliant release, never to a fresher one
-- Creates a PR listing updated packages
+- Creates a PR listing updated packages, with major version bumps flagged at the top
+  (see Updater PRs below)
 
 **Inputs:**
 
@@ -119,12 +121,39 @@ Automated Node.js package updates (apps schedule it weekly, Monday mornings):
 | `dry_run` | boolean | `false` | Compute and print the would-be update PR without creating a branch, commit, or PR |
 | `runner` | string | `'ubuntu-latest'` | Runner label for every job, e.g. `ubuntu-26.04` to test a new image before `ubuntu-latest` moves |
 
+### Updater PRs: token, CI and lane label
+
+Both update workflows push the branch and open the PR as the org's
+**mpi-automation** GitHub App, not with `GITHUB_TOKEN`. GitHub starts no workflow
+from events that `GITHUB_TOKEN` causes, so PRs it opened got no CI run, and a
+manual `gh workflow run` doesn't count toward required checks. Pushed by the App,
+the branch starts the app's `ci.yml` and the PR starts `risk-lane-gate`.
+
+- Each run mints a one-hour installation token with
+  `actions/create-github-app-token`, scoped to the calling repository with
+  Contents and Pull requests write. A dry run mints it too, which checks the
+  credentials without pushing.
+- **Credentials:** org variable `MPI_AUTOMATION_APP_ID` and org secret
+  `MPI_AUTOMATION_PRIVATE_KEY`, both visible to the calling repository. The
+  caller must pass `secrets: inherit` (the variable needs nothing: called
+  workflows read the caller's `vars`). The App must be installed on the
+  calling repository.
+- **Commit identity:** the App's bot user (`mpi-automation[bot]`).
+- **Lane label:** the PR gets `risk-high` when any changed dependency file
+  matches a glob in the app's `config/risky_paths.yml`, `risk-low` when none
+  does, and no label when the app has no such file. Matching uses the same
+  `File.fnmatch` flags as the apps' `lib/risky_paths.rb`
+  (`scripts/lib/risk_lane.rb`).
+- **Major bumps:** listed first in the PR body. A bump is major when the
+  leading version segment changes, or, below 1.0, the second one does.
+
 ### lint.yml (this repository's own CI)
 
 Runs on every push to this repository:
 - `shellcheck` over `scripts/`
 - `actionlint` over `.github/workflows/`
 - Fixture tests for the Gemfile pin-editing library (`ruby scripts/test/gemfile_edit_test.rb`)
+- Tests for the lane-label matcher (`ruby scripts/test/risk_lane_test.rb`)
 
 ## Centralized Update Scripts (`scripts/`)
 

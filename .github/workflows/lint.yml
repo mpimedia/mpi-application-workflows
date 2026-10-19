@@ -45,3 +45,6 @@ jobs:
 
       - name: Run gemfile_edit fixture tests
         run: ruby scripts/test/gemfile_edit_test.rb
+
+      - name: Run risk_lane tests
+        run: ruby scripts/test/risk_lane_test.rb

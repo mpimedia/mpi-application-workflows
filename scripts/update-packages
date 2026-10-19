@@ -10,10 +10,21 @@
 # Environment:
 #   DRY_RUN=true   Compute and print the would-be PR, then restore all files.
 #                  Skips the branch guard, commit, push, and PR creation.
+#   GH_TOKEN       Token gh uses to open the PR. The workflow passes the
+#                  mpi-automation App token, so the push and PR start CI.
+#   GIT_USER_NAME, GIT_USER_EMAIL
+#                  Commit identity (default: github-actions[bot]).
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RISK_LANE="$SCRIPT_DIR/lib/risk_lane.rb"
 DRY_RUN="${DRY_RUN:-false}"
+GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
+
+# Files the commit stages: package.json, yarn.lock and the optional Yarn artifacts.
+YARN_PATHS=(package.json yarn.lock .yarnrc.yml .yarn .pnp.cjs .pnp.loader.mjs)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -173,6 +184,37 @@ UPDATED_LIST="$(ORIG_PKG="$ORIG_PKG" node -e '
 if [ -z "$UPDATED_LIST" ]; then
   UPDATED_LIST="_Lockfile-only changes (transitive dependencies)_"
 fi
+# Major bumps, flagged so review attention goes there first. Semver caret
+# rules: the leading segment changed, or, below 1.0, the second one did
+# (0.9 → 0.10 may break as much as 1.x → 2.x).
+# shellcheck disable=SC2016
+MAJOR_LIST="$(ORIG_PKG="$ORIG_PKG" node -e '
+  const fs = require("fs");
+  const before = JSON.parse(fs.readFileSync(process.env.ORIG_PKG, "utf8"));
+  const after = JSON.parse(fs.readFileSync("package.json", "utf8"));
+  const segments = (v) => v.replace(/^[\^~>=<]+/, "").split(/[.-]/).map(Number);
+  const majorBump = (from, to) => {
+    const [a, b] = [segments(from), segments(to)];
+    return a[0] !== b[0] || (a[0] === 0 && a[1] !== b[1]);
+  };
+  for (const section of ["dependencies", "devDependencies"]) {
+    const old = before[section] || {};
+    const cur = after[section] || {};
+    for (const name of Object.keys(cur)) {
+      if (old[name] && old[name] !== cur[name] && majorBump(old[name], cur[name])) {
+        console.log(`- ${name}: ${old[name]} → ${cur[name]} (${section})`);
+      }
+    }
+  }
+')"
+
+# Lane label from the app's config/risky_paths.yml; empty when the app has none.
+LANE_LABEL="$(
+  {
+    git diff --name-only -z HEAD -- "${YARN_PATHS[@]}"
+    git ls-files --others --exclude-standard -z -- "${YARN_PATHS[@]}"
+  } | ruby "$RISK_LANE" config/risky_paths.yml
+)"
 
 PR_TITLE="chore: Update npm packages ($(date +%Y-%m-%d))"
 
@@ -180,6 +222,10 @@ PR_BODY="## Package Updates
 
 Versions resolved under Yarn's \`npmMinimalAgeGate\` — releases younger than
 the configured minimum age were not considered.
+
+### Major version bumps (review these first)
+
+${MAJOR_LIST:-_None_}
 
 ### Updated packages
 
@@ -198,6 +244,8 @@ $(git diff package.json)
 if [ "$DRY_RUN" = "true" ]; then
   echo -e "${BLUE}--- DRY RUN: would-be PR title ---${NC}"
   echo "$PR_TITLE"
+  echo -e "${BLUE}--- DRY RUN: would-be PR label ---${NC}"
+  echo "${LANE_LABEL:-(none: no config/risky_paths.yml)}"
   echo -e "${BLUE}--- DRY RUN: would-be PR body ---${NC}"
   echo "$PR_BODY"
   echo -e "${BLUE}--- DRY RUN: restoring original package.json and yarn.lock ---${NC}"
@@ -215,8 +263,8 @@ if [ "$CREATE_NEW_BRANCH" = "true" ]; then
 fi
 
 echo -e "${YELLOW}Committing changes...${NC}"
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git config user.name "$GIT_USER_NAME"
+git config user.email "$GIT_USER_EMAIL"
 
 git add package.json yarn.lock
 
@@ -244,11 +292,14 @@ if [ "$CREATE_NEW_BRANCH" = "true" ]; then
   if command -v gh &> /dev/null; then
     if gh auth status >/dev/null 2>&1 || [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
       echo -e "${YELLOW}Creating pull request...${NC}"
+      LABEL_ARGS=()
+      [ -n "$LANE_LABEL" ] && LABEL_ARGS=(--label "$LANE_LABEL")
       gh pr create \
         --title "$PR_TITLE" \
         --body "$PR_BODY" \
         --base main \
-        --head "$BRANCH_NAME"
+        --head "$BRANCH_NAME" \
+        ${LABEL_ARGS[@]+"${LABEL_ARGS[@]}"}
       echo -e "${GREEN}✓ Pull request created successfully!${NC}"
     else
       echo -e "${YELLOW}Skipping PR creation - authenticate gh or export GH_TOKEN.${NC}"

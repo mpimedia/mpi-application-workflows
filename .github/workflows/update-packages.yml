@@ -20,12 +20,51 @@ jobs:
   update-packages:
     runs-on: ${{ inputs.runner }}
     env:
-      GH_TOKEN: ${{ github.token }}
       DRY_RUN: ${{ inputs.dry_run }}
 
     steps:
+      # The branch push and PR use an installation token of the org's
+      # mpi-automation GitHub App, not GITHUB_TOKEN: GitHub starts no workflow
+      # from GITHUB_TOKEN events, so the app's CI and risk-lane-gate never ran
+      # on the updater PRs (ISS#41). App ID and key are org-level and reach
+      # this workflow through the caller's `secrets: inherit`. Dry runs mint
+      # the token too, which checks the credentials without pushing.
+      - name: Check mpi-automation credentials
+        env:
+          APP_ID: ${{ vars.MPI_AUTOMATION_APP_ID }}
+          HAS_PRIVATE_KEY: ${{ secrets.MPI_AUTOMATION_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$APP_ID" ] || [ "$HAS_PRIVATE_KEY" != "true" ]; then
+            echo "::error::MPI_AUTOMATION_APP_ID (org variable) and MPI_AUTOMATION_PRIVATE_KEY (org secret) must be visible to this repository, and the caller must pass secrets: inherit."
+            exit 1
+          fi
+
+      - name: Mint mpi-automation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.MPI_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.MPI_AUTOMATION_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # Commits are authored by the App's bot user, the identity that pushes them.
+      - name: Resolve bot commit identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          user_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          echo "name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      # The token persists in the checkout's git config, so the script's
+      # `git push` runs as the App.
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       # Checks out this workflow's own repository at the exact SHA the calling
       # app pinned in `uses:` — the documented pattern for reusable workflows
@@ -53,6 +92,10 @@ jobs:
           yarn install --immutable
 
       - name: Run update script
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_USER_NAME: ${{ steps.bot.outputs.name }}
+          GIT_USER_EMAIL: ${{ steps.bot.outputs.email }}
         run: bash "$GITHUB_WORKSPACE/.mpi-application-workflows/scripts/update-packages"
 
   notify-failure:
