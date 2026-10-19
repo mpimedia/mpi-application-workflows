@@ -10,10 +10,27 @@
 # Environment:
 #   DRY_RUN=true   Compute and print the would-be PR, then restore all files.
 #                  Skips the branch guard, commit, push, and PR creation.
+#   UPDATE_PR_DIR  Set by the workflow: write the commit's branch, PR title,
+#                  body and label here and stop. The workflow exports the
+#                  commit as a patch, and its publish job, on a fresh runner,
+#                  checks it (scripts/apply-update-patch), mints the
+#                  mpi-automation App token and runs scripts/publish-update-pr,
+#                  so the push and PR start CI. Unset (a local run), this
+#                  script runs publish-update-pr itself.
+#   GIT_USER_NAME, GIT_USER_EMAIL
+#                  Commit identity (default: github-actions[bot]).
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RISK_LANE="$SCRIPT_DIR/lib/risk_lane.rb"
+YARN_LOCK_NAMES="$SCRIPT_DIR/lib/yarn_lock_names.rb"
 DRY_RUN="${DRY_RUN:-false}"
+GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
+
+# Files the commit stages: package.json, yarn.lock and the optional Yarn artifacts.
+YARN_PATHS=(package.json yarn.lock .yarnrc.yml .yarn .pnp.cjs .pnp.loader.mjs)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -35,8 +52,12 @@ if [ "$DRY_RUN" != "true" ]; then
   if [ "$CURRENT_BRANCH" = "main" ]; then
     echo -e "${YELLOW}On main branch, will create new update branch${NC}"
     CREATE_NEW_BRANCH=true
-    echo -e "${YELLOW}Pulling latest changes...${NC}"
-    git pull origin main
+    # In CI the checkout is already the dispatched commit of main, and it
+    # holds no credentials (persist-credentials: false), so only pull locally.
+    if [ -z "${GITHUB_ACTIONS:-}" ]; then
+      echo -e "${YELLOW}Pulling latest changes...${NC}"
+      git pull origin main
+    fi
   elif [[ "$CURRENT_BRANCH" == chore/update-packages-* ]]; then
     echo -e "${YELLOW}On existing update branch: ${CURRENT_BRANCH}${NC}"
     BRANCH_NAME="$CURRENT_BRANCH"
@@ -173,6 +194,50 @@ UPDATED_LIST="$(ORIG_PKG="$ORIG_PKG" node -e '
 if [ -z "$UPDATED_LIST" ]; then
   UPDATED_LIST="_Lockfile-only changes (transitive dependencies)_"
 fi
+# Major bumps, flagged so review attention goes there first. Semver caret
+# rules: the leading segment changed, or, below 1.0, the second one did
+# (0.9 → 0.10 may break as much as 1.x → 2.x).
+# shellcheck disable=SC2016
+MAJOR_LIST="$(ORIG_PKG="$ORIG_PKG" node -e '
+  const fs = require("fs");
+  const before = JSON.parse(fs.readFileSync(process.env.ORIG_PKG, "utf8"));
+  const after = JSON.parse(fs.readFileSync("package.json", "utf8"));
+  const segments = (v) => v.replace(/^[\^~>=<]+/, "").split(/[.-]/).map(Number);
+  const majorBump = (from, to) => {
+    const [a, b] = [segments(from), segments(to)];
+    // Not a version on either side (workspace:, npm: aliases, git URLs, *): not flagged.
+    if (a.some(Number.isNaN) || b.some(Number.isNaN)) return false;
+    return a[0] !== b[0] || (a[0] === 0 && a[1] !== b[1]);
+  };
+  for (const section of ["dependencies", "devDependencies"]) {
+    const old = before[section] || {};
+    const cur = after[section] || {};
+    for (const name of Object.keys(cur)) {
+      if (old[name] && old[name] !== cur[name] && majorBump(old[name], cur[name])) {
+        console.log(`- ${name}: ${old[name]} → ${cur[name]} (${section})`);
+      }
+    }
+  }
+')"
+
+# Packages in yarn.lock for the first time, direct or transitive: the
+# new_dependency kind in config/risky_paths.yml (HC decision on ISS#41).
+# Name lists are captured first so a parse failure stops the script.
+NAMES_BEFORE="$(ruby "$YARN_LOCK_NAMES" "$ORIG_YARN_LOCK")"
+NAMES_AFTER="$(ruby "$YARN_LOCK_NAMES" yarn.lock)"
+NEW_PACKAGES="$(LC_ALL=C comm -13 <(echo "$NAMES_BEFORE") <(echo "$NAMES_AFTER"))"
+NEW_PACKAGES_LIST="$(echo "$NEW_PACKAGES" | awk 'NF { printf "- %s\n", $0 }')"
+
+# Lane label from the app's config/risky_paths.yml; empty when the app has none.
+# risk-high when a changed file is listed there or any package is new.
+# npm names never contain whitespace or glob characters, so word splitting is safe.
+# shellcheck disable=SC2086
+LANE_LABEL="$(
+  {
+    git diff --name-only -z HEAD -- "${YARN_PATHS[@]}"
+    git ls-files --others --exclude-standard -z -- "${YARN_PATHS[@]}"
+  } | ruby "$RISK_LANE" config/risky_paths.yml $NEW_PACKAGES
+)"
 
 PR_TITLE="chore: Update npm packages ($(date +%Y-%m-%d))"
 
@@ -180,6 +245,14 @@ PR_BODY="## Package Updates
 
 Versions resolved under Yarn's \`npmMinimalAgeGate\` — releases younger than
 the configured minimum age were not considered.
+
+### Major version bumps (review these first)
+
+${MAJOR_LIST:-_None_}
+
+### New dependencies (new to yarn.lock; makes this PR risk-high)
+
+${NEW_PACKAGES_LIST:-_None_}
 
 ### Updated packages
 
@@ -198,6 +271,8 @@ $(git diff package.json)
 if [ "$DRY_RUN" = "true" ]; then
   echo -e "${BLUE}--- DRY RUN: would-be PR title ---${NC}"
   echo "$PR_TITLE"
+  echo -e "${BLUE}--- DRY RUN: would-be PR label ---${NC}"
+  echo "${LANE_LABEL:-(none: no config/risky_paths.yml)}"
   echo -e "${BLUE}--- DRY RUN: would-be PR body ---${NC}"
   echo "$PR_BODY"
   echo -e "${BLUE}--- DRY RUN: restoring original package.json and yarn.lock ---${NC}"
@@ -207,7 +282,7 @@ if [ "$DRY_RUN" = "true" ]; then
   exit 0
 fi
 
-# --- Commit, push, PR ---
+# --- Commit (publish-update-pr pushes and opens the PR) ---
 if [ "$CREATE_NEW_BRANCH" = "true" ]; then
   BRANCH_NAME="chore/update-packages-$(date +%Y-%m-%d-%H%M%S)"
   echo -e "${YELLOW}Creating branch: ${BRANCH_NAME}${NC}"
@@ -215,8 +290,8 @@ if [ "$CREATE_NEW_BRANCH" = "true" ]; then
 fi
 
 echo -e "${YELLOW}Committing changes...${NC}"
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git config user.name "$GIT_USER_NAME"
+git config user.email "$GIT_USER_EMAIL"
 
 git add package.json yarn.lock
 
@@ -237,35 +312,22 @@ fi
 
 git commit -m "$PR_TITLE"
 
-echo -e "${YELLOW}Pushing branch to GitHub...${NC}"
-git push -u origin "$BRANCH_NAME"
+# --- Hand off to publish-update-pr ---
+# In CI the workflow sets UPDATE_PR_DIR and publishes from a separate job that
+# holds the App token and recomputes the label. Run locally, publish now with
+# the developer's credentials.
+PR_DIR="${UPDATE_PR_DIR:-$(mktemp -d)}"
+mkdir -p "$PR_DIR"
+printf '%s' "$BRANCH_NAME" > "$PR_DIR/branch"
+printf '%s' "$PR_TITLE" > "$PR_DIR/title"
+printf '%s' "$PR_BODY" > "$PR_DIR/body"
+printf '%s' "$LANE_LABEL" > "$PR_DIR/label"
+printf '%s' "$CREATE_NEW_BRANCH" > "$PR_DIR/new_branch"
 
-if [ "$CREATE_NEW_BRANCH" = "true" ]; then
-  if command -v gh &> /dev/null; then
-    if gh auth status >/dev/null 2>&1 || [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
-      echo -e "${YELLOW}Creating pull request...${NC}"
-      gh pr create \
-        --title "$PR_TITLE" \
-        --body "$PR_BODY" \
-        --base main \
-        --head "$BRANCH_NAME"
-      echo -e "${GREEN}✓ Pull request created successfully!${NC}"
-    else
-      echo -e "${YELLOW}Skipping PR creation - authenticate gh or export GH_TOKEN.${NC}"
-      echo -e "${YELLOW}Branch pushed: ${BRANCH_NAME}${NC}"
-    fi
-  else
-    echo -e "${RED}GitHub CLI (gh) not installed. Please create the PR manually.${NC}"
-    echo -e "${YELLOW}Branch pushed: ${BRANCH_NAME}${NC}"
-    echo ""
-    echo "PR Title: $PR_TITLE"
-    echo ""
-    echo "PR Body:"
-    echo "$PR_BODY"
-  fi
+if [ -n "${UPDATE_PR_DIR:-}" ]; then
+  echo -e "${GREEN}✓ Committed ${BRANCH_NAME}; the publish step pushes it and opens the PR.${NC}"
 else
-  echo -e "${GREEN}✓ Changes pushed to existing branch: ${BRANCH_NAME}${NC}"
-  echo -e "${YELLOW}The existing PR will be updated automatically.${NC}"
+  bash "$SCRIPT_DIR/publish-update-pr" "$PR_DIR"
 fi
 
 echo -e "${GREEN}=== Package update complete! ===${NC}"

@@ -17,15 +17,30 @@ on:
         type: string
 
 jobs:
+  # Two jobs, so the mpi-automation App's key and token never share a runner
+  # with dependency code (ISS#41). `update-packages` runs bundle or yarn, which fetch
+  # and run code from the registries; it has no secrets, a read-only
+  # GITHUB_TOKEN and no App action, and hands over its commit as a patch.
+  # `publish` starts on a fresh runner, treats that patch as untrusted, checks
+  # it and recomputes the lane label, and only then mints the App token.
+  #
+  # The App token, not GITHUB_TOKEN, makes the push and PR: GitHub starts no
+  # workflow from GITHUB_TOKEN events, so the app's CI and risk-lane-gate never
+  # ran on updater PRs.
   update-packages:
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
     env:
-      GH_TOKEN: ${{ github.token }}
       DRY_RUN: ${{ inputs.dry_run }}
+    outputs:
+      has_update: ${{ steps.patch.outputs.has_update }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       # Checks out this workflow's own repository at the exact SHA the calling
       # app pinned in `uses:` — the documented pattern for reusable workflows
@@ -37,9 +52,14 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .mpi-application-workflows
+          persist-credentials: false
 
       - name: Show resolved workflow source
         run: echo "Running scripts from ${{ job.workflow_repository }}@${{ job.workflow_sha }}"
+
+      # The script's lane-label helpers (scripts/lib/*.rb) are plain Ruby.
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -52,13 +72,126 @@ jobs:
           corepack enable
           yarn install --immutable
 
+      # Commits locally and writes the PR's branch, title and body to
+      # UPDATE_PR_DIR. Dry runs print the would-be PR and commit nothing.
       - name: Run update script
+        env:
+          UPDATE_PR_DIR: ${{ runner.temp }}/update-pr
         run: bash "$GITHUB_WORKSPACE/.mpi-application-workflows/scripts/update-packages"
+
+      - name: Export the update commit as a patch
+        id: patch
+        run: |
+          if [ -f "$RUNNER_TEMP/update-pr/branch" ]; then
+            git format-patch -1 --stdout --binary > "$RUNNER_TEMP/update-pr/update.patch"
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the update for the publish job
+        if: steps.patch.outputs.has_update == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-pr
+          path: ${{ runner.temp }}/update-pr/
+          retention-days: 1
+
+  publish:
+    needs: [update-packages]
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    env:
+      # Dry runs and runs with nothing to update skip to the credential check.
+      PUBLISH: ${{ needs.update-packages.outputs.has_update == 'true' && !inputs.dry_run }}
+
+    steps:
+      # This job holds the App's key (the mint step and its post step), so every
+      # action in it is pinned by SHA: a moved tag can't reach the key.
+      # Client ID and key are org-level, and reach this workflow through the
+      # caller's `secrets: inherit`.
+      - name: Check mpi-automation credentials
+        env:
+          CLIENT_ID: ${{ vars.MPI_AUTOMATION_CLIENT_ID }}
+          HAS_PRIVATE_KEY: ${{ secrets.MPI_AUTOMATION_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$CLIENT_ID" ] || [ "$HAS_PRIVATE_KEY" != "true" ]; then
+            echo "::error::MPI_AUTOMATION_CLIENT_ID (org variable) and MPI_AUTOMATION_PRIVATE_KEY (org secret) must be visible to this repository, and the caller must pass secrets: inherit."
+            exit 1
+          fi
+
+      # The same commit the update job started from.
+      - name: Checkout repository
+        if: env.PUBLISH == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout mpi-application-workflows scripts
+        if: env.PUBLISH == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpi-application-workflows
+          persist-credentials: false
+
+      # A fixed Ruby for this repo's helpers, not the app's: nothing here
+      # installs or runs the app's gems.
+      - name: Set up Ruby
+        if: env.PUBLISH == 'true'
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: '3.4'
+          bundler: none
+
+      - name: Download the update
+        if: env.PUBLISH == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: update-pr
+          path: ${{ runner.temp }}/update-pr
+
+      # Fails unless the patch touches only packages dependency files and the
+      # branch and title have the update script's shape; recomputes the label.
+      - name: Check and apply the update patch
+        if: env.PUBLISH == 'true'
+        run: bash "$GITHUB_WORKSPACE/.mpi-application-workflows/scripts/apply-update-patch" packages "$RUNNER_TEMP/update-pr" "$RUNNER_TEMP/publish-pr"
+
+      # Dry runs mint the token too, which checks the credentials.
+      - name: Mint mpi-automation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MPI_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.MPI_AUTOMATION_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # Commits are authored by the App's bot user, the identity that pushes them.
+      - name: Resolve bot commit identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          user_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          echo "name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Push branch and open PR
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_USER_NAME: ${{ steps.bot.outputs.name }}
+          GIT_USER_EMAIL: ${{ steps.bot.outputs.email }}
+        run: bash "$GITHUB_WORKSPACE/.mpi-application-workflows/scripts/publish-update-pr" "$RUNNER_TEMP/publish-pr"
 
   notify-failure:
     name: Notify on Failure
     runs-on: ${{ inputs.runner }}
-    needs: [update-packages]
+    needs: [update-packages, publish]
     if: failure()
     steps:
       - name: Send failure notification
@@ -76,6 +209,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REPO: ${{ github.repository }}
           JOB_RESULT: ${{ needs.update-packages.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           SUBJECT=$(printf '\u274c GitHub Action Failed: %s \u2013 %s' "$REPO" "$WORKFLOW_NAME")
@@ -89,6 +223,7 @@ jobs:
 
           Job Results:
             update-packages: $JOB_RESULT
+            publish: $PUBLISH_RESULT
 
           View run:  $RUN_URL
           BODY_EOF
