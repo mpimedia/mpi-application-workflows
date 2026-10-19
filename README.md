@@ -133,7 +133,7 @@ the branch starts the app's `ci.yml` and the PR starts `risk-lane-gate`.
   `actions/create-github-app-token`, scoped to the calling repository with
   Contents and Pull requests write. A dry run mints it too, which checks the
   credentials without pushing.
-- **Credentials:** org variable `MPI_AUTOMATION_APP_ID` and org secret
+- **Credentials:** org variable `MPI_AUTOMATION_CLIENT_ID` and org secret
   `MPI_AUTOMATION_PRIVATE_KEY`, both visible to the calling repository. The
   caller must pass `secrets: inherit` (the variable needs nothing: called
   workflows read the caller's `vars`). The App must be installed on the

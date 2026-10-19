@@ -26,16 +26,16 @@ jobs:
       # The branch push and PR use an installation token of the org's
       # mpi-automation GitHub App, not GITHUB_TOKEN: GitHub starts no workflow
       # from GITHUB_TOKEN events, so the app's CI and risk-lane-gate never ran
-      # on the updater PRs (ISS#41). App ID and key are org-level and reach
+      # on the updater PRs (ISS#41). Client ID and key are org-level and reach
       # this workflow through the caller's `secrets: inherit`. Dry runs mint
       # the token too, which checks the credentials without pushing.
       - name: Check mpi-automation credentials
         env:
-          APP_ID: ${{ vars.MPI_AUTOMATION_APP_ID }}
+          CLIENT_ID: ${{ vars.MPI_AUTOMATION_CLIENT_ID }}
           HAS_PRIVATE_KEY: ${{ secrets.MPI_AUTOMATION_PRIVATE_KEY != '' }}
         run: |
-          if [ -z "$APP_ID" ] || [ "$HAS_PRIVATE_KEY" != "true" ]; then
-            echo "::error::MPI_AUTOMATION_APP_ID (org variable) and MPI_AUTOMATION_PRIVATE_KEY (org secret) must be visible to this repository, and the caller must pass secrets: inherit."
+          if [ -z "$CLIENT_ID" ] || [ "$HAS_PRIVATE_KEY" != "true" ]; then
+            echo "::error::MPI_AUTOMATION_CLIENT_ID (org variable) and MPI_AUTOMATION_PRIVATE_KEY (org secret) must be visible to this repository, and the caller must pass secrets: inherit."
             exit 1
           fi
 
@@ -43,7 +43,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.MPI_AUTOMATION_APP_ID }}
+          client-id: ${{ vars.MPI_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.MPI_AUTOMATION_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
