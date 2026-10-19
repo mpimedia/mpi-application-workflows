@@ -67,8 +67,16 @@ jobs:
           DEFAULT_SHA: ${{ github.sha }}
           REQUESTED_SHA: ${{ inputs.sha }}
           REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           if [ "$EVENT_NAME" != "workflow_run" ] && [ -n "$REQUESTED_SHA" ]; then
+            # With deployment: false, nothing proves GitHub still applies the environment's
+            # branch policy, so a named SHA only ships from a dispatch on the default branch.
+            if [ -z "$DEFAULT_BRANCH" ] || [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+              echo "::error::A named sha deploys only from a dispatch on the default branch, not $REF."
+              exit 1
+            fi
             if ! printf '%s' "$REQUESTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
               echo "::error::sha must be a full 40-character commit SHA."
               exit 1
@@ -107,11 +115,12 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ steps.target.outputs.sha }}
           ENVIRONMENT: ${{ inputs.environment }}
-          ACTOR: ${{ github.actor }}
+          ACTOR: ${{ github.triggering_actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # required_contexts is empty because CI already gated this commit's staging deploy;
-          # triggered_by keeps who pressed the button, since the record's creator is the bot.
+          # triggered_by keeps the account that dispatched (or re-ran) this run, since the
+          # record's creator is the Actions bot.
           ID=$(jq -n --arg ref "$SHA" --arg env "$ENVIRONMENT" --arg actor "$ACTOR" \
                  '{ref: $ref, environment: $env, auto_merge: false, required_contexts: [],
                    production_environment: ($env == "production"), payload: {triggered_by: $actor}}' |
@@ -182,8 +191,15 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           STATE=$([ "$JOB_STATUS" = "success" ] && echo success || echo failure)
-          jq -n --arg state "$STATE" --arg url "$RUN_URL" '{state: $state, log_url: $url}' |
-            gh api "repos/$REPO/deployments/$ID/statuses" --input - > /dev/null
+          # A record left in_progress reads as a running deploy, so retry a transient failure.
+          for attempt in 1 2 3; do
+            jq -n --arg state "$STATE" --arg url "$RUN_URL" '{state: $state, log_url: $url}' |
+              gh api "repos/$REPO/deployments/$ID/statuses" --input - > /dev/null && exit 0
+            echo "::warning::Posting the $STATE status failed (attempt $attempt)."
+            sleep $((attempt * 5))
+          done
+          echo "::error::Deployment $ID is left in_progress; post its status by hand."
+          exit 1
 
   notify-failure:
     name: Notify on Failure
