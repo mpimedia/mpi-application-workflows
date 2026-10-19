@@ -226,8 +226,16 @@ else
   FLOORED_LIST="_None_"
 fi
 
+# Gems in the lockfile for the first time, direct or transitive: the
+# new_dependency kind in config/risky_paths.yml (HC decision on ISS#41).
+NEW_GEMS="$(echo "$UPDATED_GEMS" | awk -F'\t' '$4 == "added" { print $1 }')"
+NEW_GEMS_LIST="$(echo "$UPDATED_GEMS" | awk -F'\t' '$4 == "added" { printf "- %s: %s\n", $1, $3 }')"
+
 # Lane label from the app's config/risky_paths.yml; empty when the app has none.
-LANE_LABEL="$(git diff --name-only -z HEAD -- Gemfile Gemfile.lock | ruby "$RISK_LANE" config/risky_paths.yml)"
+# risk-high when a changed file is listed there or any gem is new.
+# Gem names never contain whitespace or glob characters, so word splitting is safe.
+# shellcheck disable=SC2086
+LANE_LABEL="$(git diff --name-only -z HEAD -- Gemfile Gemfile.lock | ruby "$RISK_LANE" config/risky_paths.yml $NEW_GEMS)"
 
 PR_BODY="## Gem Updates
 
@@ -237,6 +245,10 @@ configured minimum age were not considered.
 ### Major version bumps (review these first)
 
 ${MAJOR_LIST:-_None_}
+
+### New dependencies (new to the lockfile; makes this PR risk-high)
+
+${NEW_GEMS_LIST:-_None_}
 
 ### Updated gems
 

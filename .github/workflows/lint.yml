@@ -48,3 +48,6 @@ jobs:
 
       - name: Run risk_lane tests
         run: ruby scripts/test/risk_lane_test.rb
+
+      - name: Run yarn_lock_names tests
+        run: ruby scripts/test/yarn_lock_names_test.rb

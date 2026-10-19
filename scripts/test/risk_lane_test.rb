@@ -51,8 +51,10 @@ def assert_equal(expected, actual, label)
   end
 end
 
+# Changed files go on stdin; the block, if given, returns the new package names.
 def lane(config, *files)
-  Open3.capture3(RbConfig.ruby, LIB, config, stdin_data: files.map { |f| "#{f}\0" }.join)
+  new_packages = block_given? ? yield : []
+  Open3.capture3(RbConfig.ruby, LIB, config, *new_packages, stdin_data: files.map { |f| "#{f}\0" }.join)
 end
 
 Dir.mktmpdir do |dir|
@@ -82,6 +84,15 @@ Dir.mktmpdir do |dir|
   assert_equal("risk-high\n", stdout, "** crosses directories and matches dotfiles")
   stdout, = lane(with, "app/themes/a/b/package.json")
   assert_equal("risk-low\n", stdout, "* does not cross a directory")
+
+  puts "a package new to the lockfile -> risk-high (new_dependency)"
+  stdout, stderr, = lane(without, "Gemfile.lock") { ["nokogiri"] }
+  assert_equal("risk-high\n", stdout, "new package with unlisted files")
+  assert_equal(true, stderr.include?("new_dependency") && stderr.include?("nokogiri"), "names the new package")
+  stdout, = lane(without, "Gemfile.lock") { [""] }
+  assert_equal("risk-low\n", stdout, "empty name (no new packages) stays low")
+  stdout, = lane(File.join(dir, "missing.yml"), "Gemfile.lock") { ["nokogiri"] }
+  assert_equal("", stdout, "no config still prints nothing")
 
   puts "no config/risky_paths.yml -> no label"
   stdout, _, status = lane(File.join(dir, "missing.yml"), "Gemfile")

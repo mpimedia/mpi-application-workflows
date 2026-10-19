@@ -140,10 +140,14 @@ the branch starts the app's `ci.yml` and the PR starts `risk-lane-gate`.
   calling repository.
 - **Commit identity:** the App's bot user (`mpi-automation[bot]`).
 - **Lane label:** the PR gets `risk-high` when any changed dependency file
-  matches a glob in the app's `config/risky_paths.yml`, `risk-low` when none
-  does, and no label when the app has no such file. Matching uses the same
-  `File.fnmatch` flags as the apps' `lib/risky_paths.rb`
-  (`scripts/lib/risk_lane.rb`).
+  matches a glob in the app's `config/risky_paths.yml`, or when a gem or
+  package appears in the lockfile for the first time, direct or transitive
+  (the config's `new_dependency` kind; the HC merges those PRs). Otherwise it
+  gets `risk-low`, and no label when the app has no such file. Matching uses
+  the same `File.fnmatch` flags as the apps' `lib/risky_paths.rb`
+  (`scripts/lib/risk_lane.rb`). New gems come from the lockfile diff; new
+  packages from the names in `yarn.lock` before and after
+  (`scripts/lib/yarn_lock_names.rb`). The PR body lists them.
 - **Major bumps:** listed first in the PR body. A bump is major when the
   leading version segment changes, or, below 1.0, the second one does.
 
@@ -154,6 +158,7 @@ Runs on every push to this repository:
 - `actionlint` over `.github/workflows/`
 - Fixture tests for the Gemfile pin-editing library (`ruby scripts/test/gemfile_edit_test.rb`)
 - Tests for the lane-label matcher (`ruby scripts/test/risk_lane_test.rb`)
+- Tests for the `yarn.lock` name reader (`ruby scripts/test/yarn_lock_names_test.rb`)
 
 ## Centralized Update Scripts (`scripts/`)
 

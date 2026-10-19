@@ -19,6 +19,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RISK_LANE="$SCRIPT_DIR/lib/risk_lane.rb"
+YARN_LOCK_NAMES="$SCRIPT_DIR/lib/yarn_lock_names.rb"
 DRY_RUN="${DRY_RUN:-false}"
 GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
@@ -208,12 +209,23 @@ MAJOR_LIST="$(ORIG_PKG="$ORIG_PKG" node -e '
   }
 ')"
 
+# Packages in yarn.lock for the first time, direct or transitive: the
+# new_dependency kind in config/risky_paths.yml (HC decision on ISS#41).
+# Name lists are captured first so a parse failure stops the script.
+NAMES_BEFORE="$(ruby "$YARN_LOCK_NAMES" "$ORIG_YARN_LOCK")"
+NAMES_AFTER="$(ruby "$YARN_LOCK_NAMES" yarn.lock)"
+NEW_PACKAGES="$(LC_ALL=C comm -13 <(echo "$NAMES_BEFORE") <(echo "$NAMES_AFTER"))"
+NEW_PACKAGES_LIST="$(echo "$NEW_PACKAGES" | awk 'NF { printf "- %s\n", $0 }')"
+
 # Lane label from the app's config/risky_paths.yml; empty when the app has none.
+# risk-high when a changed file is listed there or any package is new.
+# npm names never contain whitespace or glob characters, so word splitting is safe.
+# shellcheck disable=SC2086
 LANE_LABEL="$(
   {
     git diff --name-only -z HEAD -- "${YARN_PATHS[@]}"
     git ls-files --others --exclude-standard -z -- "${YARN_PATHS[@]}"
-  } | ruby "$RISK_LANE" config/risky_paths.yml
+  } | ruby "$RISK_LANE" config/risky_paths.yml $NEW_PACKAGES
 )"
 
 PR_TITLE="chore: Update npm packages ($(date +%Y-%m-%d))"
@@ -226,6 +238,10 @@ the configured minimum age were not considered.
 ### Major version bumps (review these first)
 
 ${MAJOR_LIST:-_None_}
+
+### New dependencies (new to yarn.lock; makes this PR risk-high)
+
+${NEW_PACKAGES_LIST:-_None_}
 
 ### Updated packages
 
