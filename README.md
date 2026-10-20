@@ -114,10 +114,12 @@ Automated Node.js package updates (apps schedule it weekly, Monday mornings):
 - After the direct bumps, refreshes every transitive resolution within its existing
   range (`yarn up -R '*' '@*/*'`, still under the age gate), so a vulnerable
   transitive package doesn't stay locked until its parent's range moves. If the
-  refresh fails, the run keeps the direct bumps
+  refresh fails, or would resolve any range to a lower version (a locked release
+  younger than the gate, such as an escape-hatch CVE fix), the run discards it,
+  keeps the direct bumps and says so in the PR body
 - Creates a PR listing updated packages, with major version bumps flagged at the top
-  and the transitive refresh's changes listed (`scripts/lib/yarn_lock_diff.rb`;
-  `⚠ lower` marks a range that now resolves lower) (see Updater PRs below)
+  and the transitive refresh's changes listed (`scripts/lib/yarn_lock_diff.rb`)
+  (see Updater PRs below)
 - The first refreshed PR after an app bumps its pin past ISS#46 is `risk-high` once:
   the refresh brings packages new to `yarn.lock` (`new_dependency`)
 

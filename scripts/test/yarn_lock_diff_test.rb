@@ -125,6 +125,52 @@ Dir.mktmpdir do |dir|
     - …and 5 more (see the yarn.lock diff)
   OUT
 
+  puts "flags lowerings the version sets alone would hide (review on PR#47)"
+  nested = lambda do |version|
+    <<~ENTRY
+
+      "host@npm:^1.0.0":
+        version: #{version}
+        resolution: "host@npm:#{version}"
+        dependencies:
+          bar: "npm:^1"
+        dependenciesMeta:
+          fake:
+            resolution: "npm:bar@^1"
+            version: 9.9.9
+        languageName: node
+        linkType: hard
+    ENTRY
+  end
+  before2 = HEADER +
+            # One range moves down while another keeps 1.2.0: the set is unchanged.
+            entry("foo@npm:^1.0.0", "1.2.0", "foo@npm:1.2.0") +
+            entry("foo@npm:~1.1.0", "1.1.0", "foo@npm:1.1.0") +
+            entry("foo@npm:1.2.0", "1.2.0", "foo@npm:1.2.0") +
+            # An npm alias resolves under the real package's name.
+            entry("alias@npm:qux@^2.0.0", "2.3.0", "qux@npm:2.3.0") +
+            entry("meta@npm:^1.0.0", "1.0.1+build.5", "meta@npm:1.0.1+build.5") +
+            nested.call("1.0.0")
+  after2 = HEADER +
+           entry("foo@npm:^1.0.0", "1.1.0", "foo@npm:1.1.0") +
+           entry("foo@npm:~1.1.0", "1.1.0", "foo@npm:1.1.0") +
+           entry("foo@npm:1.2.0", "1.2.0", "foo@npm:1.2.0") +
+           entry("alias@npm:qux@^2.0.0", "2.2.0", "qux@npm:2.2.0") +
+           entry("meta@npm:^1.0.0", "1.0.0+build.9", "meta@npm:1.0.0+build.9") +
+           nested.call("1.1.0")
+  b2 = File.join(dir, "before2.lock")
+  a2 = File.join(dir, "after2.lock")
+  File.write(b2, before2)
+  File.write(a2, after2)
+  stdout, stderr, status = Open3.capture3(RbConfig.ruby, LIB, b2, a2)
+  assert_equal(true, status.success?, "exits 0 (stderr: #{stderr})")
+  assert_equal(<<~OUT, stdout, "lowered range, alias, build metadata; nested fields ignored")
+    - foo: 1.1.0, 1.2.0 → 1.1.0, 1.2.0 ⚠ lower
+    - host: 1.0.0 → 1.1.0
+    - meta: 1.0.1+build.5 → 1.0.0+build.9 ⚠ lower
+    - qux: 2.3.0 → 2.2.0 ⚠ lower
+  OUT
+
   puts "refuses a lockfile with no resolution entries"
   stdout, _, status = Open3.capture3(RbConfig.ruby, LIB, classic, after)
   assert_equal(false, status.success?, "Yarn Classic lockfile exits non-zero")
