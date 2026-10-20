@@ -111,8 +111,15 @@ Automated Node.js package updates (apps schedule it weekly, Monday mornings):
 - Runs the centralized `scripts/update-packages` against the calling app's checkout
 - Honors Yarn's `npmMinimalAgeGate` (`.yarnrc.yml`) — `yarn up <pkg>` resolves to the
   newest gate-compliant release, never to a fresher one
+- After the direct bumps, refreshes every transitive resolution within its existing
+  range (`yarn up -R '*' '@*/*'`, still under the age gate), so a vulnerable
+  transitive package doesn't stay locked until its parent's range moves. If the
+  refresh fails, the run keeps the direct bumps
 - Creates a PR listing updated packages, with major version bumps flagged at the top
-  (see Updater PRs below)
+  and the transitive refresh's changes listed (`scripts/lib/yarn_lock_diff.rb`;
+  `⚠ lower` marks a range that now resolves lower) (see Updater PRs below)
+- The first refreshed PR after an app bumps its pin past ISS#46 is `risk-high` once:
+  the refresh brings packages new to `yarn.lock` (`new_dependency`)
 
 **Inputs:**
 
@@ -178,6 +185,7 @@ Runs on every push to this repository:
 - Fixture tests for the Gemfile pin-editing library (`ruby scripts/test/gemfile_edit_test.rb`)
 - Tests for the lane-label matcher (`ruby scripts/test/risk_lane_test.rb`)
 - Tests for the `yarn.lock` name reader (`ruby scripts/test/yarn_lock_names_test.rb`)
+- Tests for the `yarn.lock` version diff (`ruby scripts/test/yarn_lock_diff_test.rb`)
 - Tests for the publish job's patch check (`ruby scripts/test/apply_update_patch_test.rb`)
 
 ## Centralized Update Scripts (`scripts/`)
@@ -188,7 +196,8 @@ checks out **this repository at the exact SHA the calling app pinned in `uses:`*
 reusable workflows referencing their own source) and runs:
 
 - `scripts/update-gems` — orchestrates unpin → resolve → repin (see `scripts/lib/gemfile_edit.rb`)
-- `scripts/update-packages` — per-package `yarn up <name> --exact` under the age gate
+- `scripts/update-packages` — per-package `yarn up <name> --exact` under the age gate,
+  then a transitive refresh (`yarn up -R '*' '@*/*'`)
 
 Pinning an app to a workflow SHA therefore pins the script logic too. Bumping the
 pin is the only way an app picks up new update behavior.
