@@ -19,20 +19,34 @@ on:
         required: false
         default: 'ubuntu-latest'
         type: string
+      sha:
+        description: >-
+          Full commit SHA to deploy on a manual dispatch, instead of the dispatched branch's tip.
+          It must be reachable from that branch. Empty deploys the tip, as before.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
   packages: write
+  deployments: write
 
 jobs:
   deploy:
-    environment: ${{ inputs.environment }}
+    # GitHub creates an environment's deployment record from github.sha, the branch tip on a
+    # dispatch. When an older commit is named, skip that record and write one for the commit
+    # that actually ships (the "Record deployment" steps below).
+    environment:
+      name: ${{ inputs.environment }}
+      deployment: ${{ inputs.sha == '' || github.event_name == 'workflow_run' }}
     runs-on: ${{ inputs.runner }}
 
     permissions:
       contents: read
       packages: write
       id-token: write
+      deployments: write
 
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_DEPLOYMENT_TOKEN }}
@@ -51,7 +65,65 @@ jobs:
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           DEFAULT_SHA: ${{ github.sha }}
+          REQUESTED_SHA: ${{ inputs.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
+          if [ "$EVENT_NAME" != "workflow_run" ] && [ -n "$REQUESTED_SHA" ]; then
+            # With deployment: false, nothing proves GitHub still applies the environment's
+            # branch policy, so a named SHA only ships from a dispatch on the default branch.
+            if [ -z "$DEFAULT_BRANCH" ] || [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+              echo "::error::A named sha deploys only from a dispatch on the default branch, not $REF."
+              exit 1
+            fi
+            if ! printf '%s' "$REQUESTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::sha must be a full 40-character commit SHA."
+              exit 1
+            fi
+            # compare/<sha>...<tip> is "ahead" or "identical" only when the branch contains sha.
+            # DEFAULT_SHA is the branch's tip at dispatch (REF is checked above), so a tag that
+            # shares the branch's name can't stand in for it.
+            STATUS=$(gh api "repos/$REPO/compare/$REQUESTED_SHA...$DEFAULT_SHA" --jq .status) || STATUS=missing
+            if [ "$STATUS" != "ahead" ] && [ "$STATUS" != "identical" ]; then
+              echo "::error::$REQUESTED_SHA is not on $REF_NAME (compare status: $STATUS)."
+              exit 1
+            fi
+            # Forward only, checked here because this job holds the deploy-<env> concurrency
+            # group: a deploy that finished while this run was queued counts. Production must be
+            # contained in the named SHA; going back is a Kamal rollback, not this path.
+            if [ "$ENVIRONMENT" = "production" ]; then
+              # Assignments, so a failed GitHub read stops the step (bash -e) instead of skipping the check.
+              DEPLOYMENTS=$(gh api "repos/$REPO/deployments?environment=production&per_page=10" --jq '.[] | "\(.id) \(.sha)"')
+              LAST_SHA=""
+              while read -r ID SHA; do
+                [ -n "$ID" ] || continue
+                STATE=$(gh api "repos/$REPO/deployments/$ID/statuses?per_page=1" --jq '.[0].state // ""')
+                if [ "$STATE" = "success" ]; then
+                  LAST_SHA=$SHA
+                  break
+                fi
+              done <<< "$DEPLOYMENTS"
+              # No success among the last 10 means production's commit is unknown, so refuse;
+              # only a production with no deploys on record at all has nothing to go back from.
+              if [ -z "$LAST_SHA" ] && [ -n "$DEPLOYMENTS" ]; then
+                echo "::error::None of production's last 10 deploys succeeded, so the forward check can't run. Deploy main's tip or use a Kamal rollback."
+                exit 1
+              fi
+              if [ -n "$LAST_SHA" ]; then
+                FORWARD=$(gh api "repos/$REPO/compare/$LAST_SHA...$REQUESTED_SHA" --jq .status) || FORWARD=missing
+                if [ "$FORWARD" != "ahead" ] && [ "$FORWARD" != "identical" ]; then
+                  echo "::error::$REQUESTED_SHA is not ahead of production's last successful deploy $LAST_SHA (compare status: $FORWARD)."
+                  exit 1
+                fi
+              fi
+            fi
+            echo "Deploying $REQUESTED_SHA, named on dispatch; $REF_NAME is at $DEFAULT_SHA."
+            echo "sha=$REQUESTED_SHA" >> "$GITHUB_OUTPUT"
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT_NAME" != "workflow_run" ]; then
             echo "sha=$DEFAULT_SHA" >> "$GITHUB_OUTPUT"
             echo "deploy=true" >> "$GITHUB_OUTPUT"
@@ -66,6 +138,28 @@ jobs:
             echo "::notice::Skipping deploy of $RUN_HEAD_SHA: $RUN_HEAD_BRANCH has moved to $TIP_SHA, whose own CI run will trigger its deploy."
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Record deployment
+        id: record
+        if: inputs.sha != '' && github.event_name != 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.target.outputs.sha }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          ACTOR: ${{ github.triggering_actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # required_contexts is empty because CI already gated this commit's staging deploy;
+          # triggered_by keeps the account that dispatched (or re-ran) this run, since the
+          # record's creator is the Actions bot.
+          ID=$(jq -n --arg ref "$SHA" --arg env "$ENVIRONMENT" --arg actor "$ACTOR" \
+                 '{ref: $ref, environment: $env, auto_merge: false, required_contexts: [],
+                   production_environment: ($env == "production"), payload: {triggered_by: $actor}}' |
+               gh api "repos/$REPO/deployments" --input - --jq .id)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          jq -n --arg url "$RUN_URL" '{state: "in_progress", log_url: $url}' |
+            gh api "repos/$REPO/deployments/$ID/statuses" --input - > /dev/null
 
       - name: Checkout repository
         if: steps.target.outputs.deploy == 'true'
@@ -119,6 +213,26 @@ jobs:
           ./bin/kamal build push --output=docker
           ./bin/kamal deploy
 
+      - name: Finish deployment record
+        if: always() && steps.record.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ID: ${{ steps.record.outputs.id }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          STATE=$([ "$JOB_STATUS" = "success" ] && echo success || echo failure)
+          # A record left in_progress reads as a running deploy, so retry a transient failure.
+          for attempt in 1 2 3; do
+            jq -n --arg state "$STATE" --arg url "$RUN_URL" '{state: $state, log_url: $url}' |
+              gh api "repos/$REPO/deployments/$ID/statuses" --input - > /dev/null && exit 0
+            echo "::warning::Posting the $STATE status failed (attempt $attempt)."
+            sleep $((attempt * 5))
+          done
+          echo "::error::Deployment $ID is left in_progress; post its status by hand."
+          exit 1
+
   notify-failure:
     name: Notify on Failure
     runs-on: ${{ inputs.runner }}
@@ -135,7 +249,7 @@ jobs:
           WORKFLOW_NAME: ${{ github.workflow }}
           BRANCH_NAME: ${{ github.ref_name }}
           COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || github.event.head_commit.message || 'N/A' }}
-          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
           RUN_ACTOR: ${{ github.actor }}
           EVENT_NAME: ${{ github.event_name }}
           REPO: ${{ github.repository }}
