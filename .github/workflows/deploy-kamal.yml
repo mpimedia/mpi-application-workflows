@@ -82,8 +82,10 @@ jobs:
               echo "::error::sha must be a full 40-character commit SHA."
               exit 1
             fi
-            # compare/<sha>...<branch> is "ahead" or "identical" only when the branch contains sha.
-            STATUS=$(gh api "repos/$REPO/compare/$REQUESTED_SHA...$REF_NAME" --jq .status) || STATUS=missing
+            # compare/<sha>...<tip> is "ahead" or "identical" only when the branch contains sha.
+            # DEFAULT_SHA is the branch's tip at dispatch (REF is checked above), so a tag that
+            # shares the branch's name can't stand in for it.
+            STATUS=$(gh api "repos/$REPO/compare/$REQUESTED_SHA...$DEFAULT_SHA" --jq .status) || STATUS=missing
             if [ "$STATUS" != "ahead" ] && [ "$STATUS" != "identical" ]; then
               echo "::error::$REQUESTED_SHA is not on $REF_NAME (compare status: $STATUS)."
               exit 1
@@ -103,6 +105,12 @@ jobs:
                   break
                 fi
               done <<< "$DEPLOYMENTS"
+              # No success among the last 10 means production's commit is unknown, so refuse;
+              # only a production with no deploys on record at all has nothing to go back from.
+              if [ -z "$LAST_SHA" ] && [ -n "$DEPLOYMENTS" ]; then
+                echo "::error::None of production's last 10 deploys succeeded, so the forward check can't run. Deploy main's tip or use a Kamal rollback."
+                exit 1
+              fi
               if [ -n "$LAST_SHA" ]; then
                 FORWARD=$(gh api "repos/$REPO/compare/$LAST_SHA...$REQUESTED_SHA" --jq .status) || FORWARD=missing
                 if [ "$FORWARD" != "ahead" ] && [ "$FORWARD" != "identical" ]; then
