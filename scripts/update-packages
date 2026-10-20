@@ -25,6 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RISK_LANE="$SCRIPT_DIR/lib/risk_lane.rb"
 YARN_LOCK_NAMES="$SCRIPT_DIR/lib/yarn_lock_names.rb"
+YARN_LOCK_DIFF="$SCRIPT_DIR/lib/yarn_lock_diff.rb"
 DRY_RUN="${DRY_RUN:-false}"
 GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
@@ -163,6 +164,39 @@ while IFS= read -r NAME; do
   fi
 done <<< "$DIRECT_DEPS"
 
+# --- Refresh transitive resolutions within their existing ranges ---
+# `yarn up <direct>` never re-resolves transitive entries, so a vulnerable
+# transitive stays locked until its parent's range changes (ISS#46). -R re-picks
+# every match under the age gate; '*' alone misses scoped names. The post-bump
+# state is restored, keeping the direct bumps, when the refresh fails, moves
+# package.json (it shouldn't: -R stays within ranges), or resolves any range
+# lower. The age gate hides a locked release younger than the gate (a CVE fix
+# applied through the escape hatch, say), so like the direct loop, never
+# downgrade; the refresh applies once that release ages past the gate.
+REFRESH_PKG="$(mktemp)"
+REFRESH_LOCK="$(mktemp)"
+cp package.json "$REFRESH_PKG"
+cp yarn.lock "$REFRESH_LOCK"
+REFRESH_SKIPPED=""
+echo -e "${YELLOW}Refreshing transitive dependencies: yarn up -R '*' '@*/*'${NC}"
+if ! yarn up -R '*' '@*/*'; then
+  REFRESH_SKIPPED="the refresh failed"
+elif ! cmp -s package.json "$REFRESH_PKG"; then
+  REFRESH_SKIPPED="it changed package.json"
+else
+  # Uncapped, so a lowering past the PR body's cap still counts.
+  REFRESH_ALL="$(ruby "$YARN_LOCK_DIFF" "$REFRESH_LOCK" yarn.lock 1000000)"
+  if grep -qF '⚠ lower' <<< "$REFRESH_ALL"; then
+    REFRESH_SKIPPED="it would resolve these to a lower version (a locked release is younger than the age gate)"$'\n\n'"$(grep -F '⚠ lower' <<< "$REFRESH_ALL")"
+  fi
+fi
+if [ -n "$REFRESH_SKIPPED" ]; then
+  echo -e "${RED}  ⚠ Transitive refresh not applied: ${REFRESH_SKIPPED}${NC}"
+  echo -e "${RED}    Keeping the direct-dependency updates only${NC}"
+  cp "$REFRESH_PKG" package.json
+  cp "$REFRESH_LOCK" yarn.lock
+fi
+
 # Re-sync Yarn's install state with the final package.json/yarn.lock pair
 # (per-package restores can leave node_modules ahead of the lockfile).
 yarn install --immutable
@@ -228,6 +262,16 @@ NAMES_AFTER="$(ruby "$YARN_LOCK_NAMES" yarn.lock)"
 NEW_PACKAGES="$(LC_ALL=C comm -13 <(echo "$NAMES_BEFORE") <(echo "$NAMES_AFTER"))"
 NEW_PACKAGES_LIST="$(echo "$NEW_PACKAGES" | awk 'NF { printf "- %s\n", $0 }')"
 
+# What the transitive refresh changed, against the lockfile after the direct
+# bumps, or why it was not applied.
+if [ -n "$REFRESH_SKIPPED" ]; then
+  REFRESH_LIST="Not applied: ${REFRESH_SKIPPED}
+
+The run kept the direct-dependency updates only; see the job log."
+else
+  REFRESH_LIST="$(ruby "$YARN_LOCK_DIFF" "$REFRESH_LOCK" yarn.lock)"
+fi
+
 # Lane label from the app's config/risky_paths.yml; empty when the app has none.
 # risk-high when a changed file is listed there or any package is new.
 # npm names never contain whitespace or glob characters, so word splitting is safe.
@@ -257,6 +301,10 @@ ${NEW_PACKAGES_LIST:-_None_}
 ### Updated packages
 
 ${UPDATED_LIST}
+
+### Transitive refresh (\`yarn up -R\`, within existing ranges)
+
+${REFRESH_LIST:-_None_}
 
 ### Changes to package.json
 
