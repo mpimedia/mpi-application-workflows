@@ -468,7 +468,7 @@ Anything open beyond 80/443 on the web droplets is urgent.
 
 **When the HC can't approve or a fix can't deploy:**
 - **Virtual patching:** a temporary Cloudflare WAF custom rule that blocks the exploit pattern, filed with the issue and removed once the fix ships. Cloudflare's managed rules often add emergency rules for big CVEs, and the drift job reports them.
-- **A backup approver.** The HC names one, who goes on the `production` environment's reviewer list for the express lane. **(HC to decide.)**
+- **Backup approvers: Brian Hall and Dennis Martinez. (HC, 2026-10-22.)** Both go on each app's `production` environment reviewer list alongside the HC, so any one of the three can approve. The builder confirms their GitHub usernames with the HC before adding them, and confirms both have two-factor on.
 
 **Accepting a risk.** `risk-register.yml` in mpi-security lists each accepted finding with:
 - the finding;
@@ -518,7 +518,7 @@ Each phase ships on its own, as one or more risk-high PRs. The order is **Claude
 
 ## Open questions for the HC
 
-- Who is the backup approver for production deploys when the HC can't be reached (part 10)?
+None open as of 2026-10-22.
 
 ## Related
 
