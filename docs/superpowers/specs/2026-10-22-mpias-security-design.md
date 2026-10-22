@@ -65,12 +65,13 @@ The threat model follows Nate Berkopec's framing (X, 2026-10-22): cheap models (
 - **A personal token anywhere in the pipeline.**
 - **False confidence.** A feed that stops quietly while the system looks green.
 - **An agent patching production on its own from an alert.**
+- **The pipeline becoming the easiest way into MPIAS.** Its credentials and inputs are guarded as carefully as production (part 9).
 
 ## Constraints
 
-- **Credentials:** no personal tokens. GitHub access uses the mpi-automation App. Anthropic access uses the existing org API account through workload identity federation, so no API key is stored (see "Credentials"). Other secrets live in org secrets or the 1Password service account.
+- **Credentials:** no personal tokens. GitHub access uses a dedicated mpi-security App (part 9), with mpi-automation still running the updaters. Anthropic access uses the existing org API account through workload identity federation, so no API key is stored (see "Credentials"). Other secrets live in org secrets or the 1Password service account.
 - **Production:** read-only. The DigitalOcean token is read-only. The droplet check uses a no-sudo user.
-- **App permissions:** add them only as needed. The HC approved these on 2026-10-21:
+- **App permissions:** add them only as needed. The HC approved these on 2026-10-21, for mpi-automation. Part 9 moves them to the dedicated App, which needs the HC's confirmation:
   - Dependabot alerts: read;
   - Code scanning alerts: read and write;
   - Issues: write on the watched repos.
@@ -378,11 +379,88 @@ The same idea applies to infrastructure, and parts 4–6 already cover those cha
 - **Monthly drill:** a synthetic advisory with a drill marker runs through matching, triage, filing and the express lane on **staging only**. The digest reports the time each step took.
 - **Coverage check:** the digest lists which repos, images, hosts and zones were scanned that week, so a gap is visible.
 
+### 9. Securing the pipeline itself
+
+The pipeline reads untrusted text and holds credentials that merge PRs and start deploys, which makes it a target in its own right. **Every rule in this section is a phase 1 requirement, not a later improvement. (HC asked for the gaps; added 2026-10-22.)**
+
+**Prompt injection.** Emails, RSS items, advisory descriptions and scanner output are attacker-controllable. A crafted item could try to hide a real alert, file a fake fix, or push a malicious package through the express lane.
+- **The Claude triage step has no tools and no credentials.** It sees text and returns structured output against a strict schema, and code validates that output. Every write (issues, dispatches, merges, emails) happens in deterministic code after the Claude step.
+- **Code decides express-lane eligibility, never Claude.** The package and patched version come from the advisory's structured data (GHSA or OSV), and the target version must be exactly the advisory's first patched version. Claude's prose can't add a package, a version or a repo.
+- **Claude can't lower severity.** Claude can raise severity or relevance. Lowering anything code computed (KEV, malware, exploited × reachable) needs a reason, goes to the digest, and doesn't suppress the deterministic result. A false "not relevant" fails safe.
+- **The inbox accepts only verified senders.** Postmark exposes SPF/DKIM/DMARC results, and a sender allowlist (list addresses and vendor domains) is checked against them. Anything else is dropped and counted in the digest.
+- **Quoted outside text in an issue is fenced and labelled untrusted.** Theo's and the agents' instructions say to treat it as data. The runbook repeats this.
+- **The monthly drill includes a prompt-injection case:** an allowlisted-looking email that tells the triage step to close or downgrade an item. It must fail.
+
+**Credentials and blast radius.**
+- **A dedicated GitHub App for the pipeline (working name `mpi-security`), separate from mpi-automation. (Claude's call; the HC creates it.)**
+  - Its private key lives only in mpi-security's repo secrets, behind a protected environment. It is never an org secret, so no other repo's workflow can read it.
+  - Its installation tokens are requested per job with the minimum `repositories` and `permissions` that job needs.
+  - mpi-automation keeps running the updaters, as now.
+  - The permissions the HC approved on 2026-10-21 for mpi-automation move to this App instead, plus whatever the express lane needs. The builder lists them for the HC.
+- **mpi-security's own workflows** run zizmor and actionlint and pin every action to a SHA. They use `permissions: {}` by default and grant per job. A ruleset protects `main` and requires review of any workflow change, and CODEOWNERS covers `.github/` and the prompts.
+- **The Anthropic workspace has a hard spending cap,** so a flood of junk input can't run up the bill. The prefilter and sender allowlist come first.
+
+**The express lane as a supply-chain path.** An attacker could publish a malicious "security fix" and count on us to rush it in.
+- The lane installs only the advisory's first patched version, never "latest".
+- It refuses when that release is under 24 hours old **and** was published by a different owner than the previous release. The builder sets the exact rule; the point is to catch account takeovers.
+- It relies on the lockfile's integrity data. Yarn 4 already records checksums. For gems, Bundler's lockfile `CHECKSUMS` section (Bundler 2.6+; the apps run Bundler 4) is turned on in each app.
+- The existing one-week npm cooldown (`npmMinimalAgeGate: 1w`) still applies to normal updater runs. The express lane is the only way past it, and only for the advisory's exact version.
+
+### 10. Beyond patching: detection, identity, domains and recovery
+
+Patching covers known vulnerabilities. These cover a break-in, a stolen account and a bad day. **(Added 2026-10-22.)**
+
+**Detecting a break-in.** All of these are read-only. The pipeline watches and files issues in the same routing:
+- **GitHub audit log** (org, read through the API; Enterprise offers streaming): new personal tokens, App installs or permission changes, ruleset and branch protection changes, secret changes, new outside collaborators, deploy keys, repo visibility changes.
+- **Audit logs from Cloudflare, DigitalOcean, Tailscale and 1Password:** new members, new API tokens, permission changes, DNS changes outside Terraform.
+- **Droplets:** SSH and Tailscale SSH logins, and new or changed user accounts, read by the `secmon` check from journald/auth logs.
+- **Apps:** bursts of failed logins, and spikes in 4xx/5xx or WAF blocks, from Cloudflare analytics.
+- Anything unexpected is urgent.
+
+**Identity posture.** A weekly check:
+- two-factor enforced on the GitHub org, Cloudflare, DigitalOcean, the domain registrar(s), 1Password, Tailscale, Postmark and AWS;
+- GitHub outside collaborators, deploy keys, the fine-grained token policy, and installed third-party Apps and OAuth apps with their permissions;
+- the org's default `GITHUB_TOKEN` permission (currently `write`, per [ISS#45](https://github.com/mpimedia/mpi-application-workflows/issues/45)).
+
+Where an API can't report something, the runbook lists it as a quarterly manual check for the HC.
+
+**Domains and DNS** (all 104 zones, not just the 8 application zones):
+- **Subdomain takeover:** records pointing at services we no longer own (old hosts, S3, SaaS CNAMEs), checked weekly with a takeover scanner (dnsReaper, or Nuclei's takeover templates).
+- **The registrar side:** registrar lock and expiry dates for every domain, and DNSSEC delegation (part 6).
+- **Email authentication:** SPF, DKIM and DMARC on every domain, including those that never send mail (`v=spf1 -all` and `p=reject`). This stops phishing emails sent in our name.
+
+**What the internet sees.** Weekly:
+- Shodan and Censys lookups (free tiers) for our IPs and domains;
+- a light port scan of the droplets' public IPs and the database endpoints.
+
+Anything open beyond 80/443 on the web droplets is urgent.
+
+**Incident response and recovery.** The runbook has an incident section:
+- who decides and who's told;
+- how to cut access (revoke tokens, rotate keys, put Cloudflare into "under attack" mode, take a host off the internet);
+- a **rotation list** for every credential: Rails master keys, database passwords, Kamal secrets, both GitHub Apps, and the Cloudflare, DigitalOcean, Postmark, Anthropic, Tailscale and 1Password service-account credentials;
+- how to restore.
+
+**A backup-restore drill every quarter** restores a managed Postgres backup (point-in-time) into a scratch cluster. A database left open to the internet makes this urgent.
+
+**When the HC can't approve or a fix can't deploy:**
+- **Virtual patching:** a temporary Cloudflare WAF custom rule that blocks the exploit pattern, filed with the issue and removed once the fix ships. Cloudflare's managed rules often add emergency rules for big CVEs, and the drift job reports them.
+- **A backup approver.** The HC names one, who goes on the `production` environment's reviewer list for the express lane. **(HC to decide.)**
+
+**Accepting a risk.** `risk-register.yml` in mpi-security lists each accepted finding with:
+- the finding;
+- the reason;
+- the owner;
+- an **expiry date**.
+
+Accepted findings are muted until expiry, then come back. Nothing is dismissed without an entry. The digest lists entries expiring soon.
+
 ## Credentials
 
 | Credential | How it's held | Scope |
 |---|---|---|
-| mpi-automation App | Existing org secret, used through `create-github-app-token` | The 3 approved permissions, plus Contents and Actions where the express lane needs them (to dispatch workflows). The builder lists the exact additions for the HC. |
+| **mpi-security App (new, dedicated)** | Private key only in mpi-security repo secrets, behind a protected environment. **Never an org secret.** Installation tokens are scoped per job. | Dependabot alerts read, Code scanning alerts read/write, Issues write, Security events/audit log read, plus Contents, Pull requests and Actions where the express lane needs them (to dispatch and merge). The builder lists the exact set for the HC. |
+| mpi-automation App | Existing org secret, unchanged | Keeps running the updaters, which open the express-lane PRs |
 | Anthropic | The existing org API account through workload identity federation (GitHub OIDC to a Console service account, `id-token: write`). No stored key. **(HC: use the existing API access.)** | A dedicated workspace with a monthly spending cap |
 | DigitalOcean | Existing 1Password item "DigitalOcean API: mpias-read-only" (Application Development vault), read through the 1Password service account | Read-only |
 | Cloudflare | A new dedicated **read-only** token for the pipeline, kept in 1Password. Changes go only through Terraform with mpi-infrastructure's existing token. | Zone, DNS, settings, WAF and analytics read |
@@ -396,14 +474,15 @@ Each phase ships on its own, as one or more risk-high PRs. The order is **Claude
 
 | Phase | What ships | Depends on |
 |---|---|---|
-| 0 | Create `mpi-security`; grant App permissions; set up Anthropic federation and the spending cap; add the Cloudflare token's read scopes; create the Postmark inbound address | HC actions |
-| 1 | Inventory, structured feeds (including the exploitation signals), matching, Claude write-ups, routing, issues, email, digest, source health, **and a one-time backfill of every existing finding on the org security overview** | Phase 0 |
+| 0 | Create the `mpi-security` repo and the **dedicated mpi-security App**; set up Anthropic federation and the hard spending cap; add the Cloudflare token's read scopes; create the Postmark inbound address | HC actions |
+| 1 | Inventory, structured feeds (including the exploitation signals), matching, Claude write-ups, routing, issues, email, digest, source health, **a one-time backfill of every existing finding on the org security overview, and all of part 9's pipeline-safety rules** | Phase 0 |
 | 1b | Cloudflare quick wins: DNSSEC, CAA, TLS settings, via Terraform | Cloudflare read scopes; runs alongside phase 1 |
 | 2 | Inbox and RSS intake with Claude triage | Phase 1, Postmark inbound |
 | 3 | Scanners (image scan, osv-scanner, zizmor/actionlint, Scorecard, secrets history, Semgrep, TLS/header checks, ZAP on staging), droplet `secmon` check, DigitalOcean, status pages, Cert Spotter | Phase 1, Tailscale tag, Cert Spotter key |
 | 4 | Express lane: `only:` input, Claude review step, staging auto-deploy, production approval, rollback, timing, drill | Phase 1, ADR-0012 amendment approved |
 | 5 | Rest of the Cloudflare baseline (WAF, rate limits, Access, origin lockdown) and drift monitoring | Phase 1b |
 | 6 | AI hunt | Phase 1 |
+| 7 | Part 10: break-in detection (audit logs, logins), identity posture, domains and DNS (takeover, registrar, SPF/DKIM/DMARC), the outside view, incident runbook and rotation list, the quarterly restore drill, virtual patching, the risk register | Phase 1. The incident runbook and restore drill may move earlier; the restore drill is cheap and the databases are exposed today. |
 | — | Runbook (`docs/security-runbook.md` in mpi-security), grown with each phase | — |
 
 ## Left to the builder
@@ -416,7 +495,7 @@ Each phase ships on its own, as one or more risk-high PRs. The order is **Claude
 
 ## Open questions for the HC
 
-None open as of 2026-10-22.
+- Who is the backup approver for production deploys when the HC can't be reached (part 10)?
 
 ## Related
 
