@@ -363,7 +363,30 @@ The same idea applies to infrastructure, and parts 4–6 already cover those cha
 - an origin that accepts only Cloudflare;
 - closing public access to the databases.
 
-**Bug hunting, after the reachability passes:**
+**Bug hunting, after the reachability passes: Cloudflare's [security-audit skill](https://github.com/cloudflare/security-audit-skill). (HC pointed to it, 2026-10-22.)**
+
+It's MIT-licensed, and it's the starting point Cloudflare's own vulnerability-discovery harness grew from. It runs a six-phase audit:
+1. reconnaissance and a coverage ledger;
+2. hunting with isolated agents;
+3. adversarial validation, where the checker is never the finder;
+4. findings written in a schema;
+5. independent re-verification;
+6. a report.
+
+Its output (`findings.json`, verdicts `confirmed` / `needs_validation` / `rejected`, validated against `report-schema.json`) feeds our triage directly:
+- **`confirmed`** findings go through routing like any other item.
+- **`needs_validation`** findings go to the digest.
+- **`rejected`** findings are kept for the record only.
+
+How we use it **(Claude's call)**:
+- **Vendored into mpi-security at a reviewed commit,** starting from `c1c8a8c1471069fb0e188eeaff69b8e8db6564a8` (2026-09-14). It's never installed with `npx skills add` from `main`, because a skill is instructions to an agent holding tools, and that's a supply-chain path. Updates are PRs that a person reads.
+- **It runs with no credentials beyond reading the target repo and writing to a scratch directory.** Its findings are text for our triage, never commands.
+- **The sandbox rule it states.** The skill only executes target code inside an OS-enforced sandbox with no outside network. Otherwise it leaves a lead as `needs_validation`. In Actions that means a locked-down container on the runner. The builder decides whether to provide that, or accept `needs_validation` for anything that needs execution.
+- **Ledgers and findings persist in mpi-security,** so runs add up. The README notes a single run finds roughly half of what repeated runs find.
+- **Cadence:** a full run per app monthly, plus a focused run when a PR touches a public path in `exposure.yml`. It runs many parallel agents, so the Anthropic spending cap and the run schedule are set together.
+- **It can run today, by hand,** in a Claude Code session on any of our repos, before the pipeline exists. That's an early win the HC can ask for at any time.
+
+**Ongoing passes:**
 
 - **Weekly, per app,** Claude reviews the code that `exposure.yml` marks public, then everything behind login, looking for exploitable flaws. It runs through the claude-code-action or the Agent SDK with the workflow's Anthropic identity.
 - **On each merge to `main`,** a lighter review covers the diff, `/security-review`-style.
