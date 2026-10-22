@@ -42,16 +42,22 @@ The threat model follows Nate Berkopec's framing (X, 2026-10-22): cheap models (
    - simple patches take an express lane;
    - everything else follows the normal assess → execute → review flow (ADR-0012).
 4. Harden the edge with Cloudflare's security features, and watch for those settings drifting.
-5. Hunt for vulnerabilities in our own code with AI before attackers do.
+5. Work through every existing finding on GitHub's [org security overview](https://github.com/orgs/mpimedia/security/overview). **(HC)** This covers:
+   - the Dependabot alerts;
+   - CodeQL and code scanning;
+   - secret scanning;
+   - the risk assessment.
+
+   At launch the pipeline backfills them all through the same triage. Each is ranked by exploited × reachable and routed like a new item. This absorbs [ISS#45](https://github.com/mpimedia/mpi-application-workflows/issues/45)'s backlog triage. On 2026-10-20 that backlog stood at 111 open Dependabot alerts in the app suite, 184 in other repos, and the CodeQL findings.
+6. Hunt for vulnerabilities in our own code with AI before attackers do.
 
 **Non-goals (for now):**
 - Buying Snyk, Socket, Aikido, StepSecurity or Ubuntu Pro. The HC chose to build, on 2026-10-21.
 - DeepSeek, as a tool or a second opinion. **(HC: tabled; reconsider after the rest is done.)**
 - Production deploys without the HC's approval.
 - An agent running around the clock. Nothing agentic runs unattended today, and Theo's cron lives only while its session is open on the Mac mini. The pipeline runs as scheduled GitHub Actions; picking up issues remains the HC's or Theo's job.
-- Clearing the existing alert backlog, which is [ISS#45](https://github.com/mpimedia/mpi-application-workflows/issues/45).
 - The ~95 film-title zones, until Garden serves them as static pages. **(HC)**
-- The 10 org repos the mpi-automation App can't see, until the HC names the live ones.
+- The 10 org repos the mpi-automation App can't see. As far as the HC knows, none are live.
 
 **Anti-goals** (these would make it a failure even if it technically works):
 - **Noise.** The HC hearing about PHP, Windows or anything else we don't run. A digest nobody reads.
@@ -131,18 +137,27 @@ The threat model follows Nate Berkopec's framing (X, 2026-10-22): cheap models (
 
 | Source | What it gives | Matched against |
 |---|---|---|
+| GitHub org security overview ([page](https://github.com/orgs/mpimedia/security/overview)): the same alerts, rolled up by repo, plus the code-security and secret risk assessments | Everything GitHub already knows about our repos. **Backfilled once at launch, then watched for changes. (HC)** | Repo |
+| [CVE List (cvelistV5)](https://github.com/CVEProject/cvelistV5) and NVD API 2.0 | New CVEs as soon as they're published (cvelistV5 updates every few minutes); severity scores from NVD | Product and package names in the inventory |
 | Org Dependabot alerts (`GET /orgs/mpimedia/dependabot/alerts`) | Gem and npm CVEs, already matched per repo by GitHub, plus malware alerts | Repo plus manifest |
 | Code scanning alerts: CodeQL, plus Trivy SARIF from the image scan | Flaws in our code, and OS or gem packages in the images | Repo or image |
 | Secret scanning alerts | Leaked credentials | Repo |
 | GitHub Advisory DB (`/advisories`, `type=malware` and `ecosystem=actions`) | Malware, and compromised or tag-moved actions | Every `uses:` line in the watched repos |
 | [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) JSON | Exploited in the wild | CVE aliases on any item |
+| VulnCheck KEV (free community tier) | Exploited in the wild; broader and often earlier than CISA | CVE aliases |
+| EPSS (FIRST.org, daily CSV/API) | A daily probability that each CVE gets exploited | CVE aliases. A high EPSS counts as an exploitation signal. |
+| GreyNoise community API | Whether attackers are scanning for a CVE right now | CVE aliases (urgent items) |
+| Public exploits: Exploit-DB, Metasploit modules, GitHub proof-of-concept trackers (for example nomi-sec/PoC-in-GitHub) | A working exploit is public | CVE aliases |
+| CISA advisories RSS | Government alerts and incident write-ups | Vendors and products |
+| Debian Security Tracker and DSA | **Debian packages in our images** (`ruby:*-slim` is Debian-based) | Image package lists |
+| endoflife.date API | End-of-life dates for Ruby, Rails, Node, Postgres, Ubuntu and Debian | Versions in the inventory |
 | OSV (`Ubuntu:24.04`, plus a lockfile cross-check) | Droplet packages and kernel; a second opinion on lockfiles | Droplet package lists and lockfiles |
-| Ubuntu USN JSON/RSS | Ubuntu security notices | Droplets and image base |
+| Ubuntu USN JSON/RSS | Ubuntu security notices | Droplets (Ubuntu 24.04) |
 | DigitalOcean API: `/v2/databases`, `/v2/databases/options` | Engine version, end-of-life dates, pending maintenance | The 8 managed Postgres clusters |
 | Status pages: DigitalOcean, Blacksmith, Cloudflare, GitHub | Incidents | nyc1, Managed Databases, Droplets, our runners |
 | Cert Spotter API **(HC)** | Certificates issued for our domains | Expected CAs and hostnames (kamal-proxy's Let's Encrypt renewals are expected) |
 | Mozilla CA incident bugs (Bugzilla) | CA compromises like eMudhra | Our trust stores and the CAs we use |
-| Cloudflare (read API) | Zone settings and security events | The hardening baseline (part 4) |
+| Cloudflare (read API) | Zone settings and security events | The hardening baseline (part 6) |
 
 **Unstructured sources** (Claude decides relevance):
 - RSS:
@@ -151,10 +166,14 @@ The threat model follows Nate Berkopec's framing (X, 2026-10-22): cheap models (
   - Node.js vulnerability feed;
   - PostgreSQL news;
   - security releases for Kamal, Puma and Thruster (GitHub release feeds);
-  - Tailscale security bulletins.
+  - Tailscale security bulletins;
+  - security news, where incidents like eMudhra surface first: BleepingComputer, The Hacker News, Ars Technica security, SecurityWeek, Risky Business.
+  - The builder may add researcher accounts on infosec.exchange (Mastodon) through their RSS feeds.
 - **A monitored inbox: a Postmark inbound address for MPIAS. (HC: Postmark rather than Microsoft 365.)** It's subscribed to:
+  - oss-security, the main public disclosure list for open-source projects. It's high volume, so the prefilter is strict;
   - ruby-security-ann;
   - rubyonrails-security;
+  - debian-security-announce;
   - nodejs-sec;
   - ubuntu-security-announce;
   - vendor security and maintenance notices from DigitalOcean, Cloudflare, Tailscale, GitHub, 1Password, Postmark and AWS.
@@ -162,6 +181,25 @@ The threat model follows Nate Berkopec's framing (X, 2026-10-22): cheap models (
 - **Builder to verify:** how long Postmark keeps inbound messages, and whether the Messages API (`/messages/inbound`) is enough for polling. If it isn't, use Postmark's inbound webhook.
 
 The builder may add sources. Each one needs an owner line in the source list, giving what it covers and why.
+
+**Scanners we run ourselves.** All are free. Each runs SHA-pinned, either in the pipeline or as a CI addition through this repo's shared workflows. Findings go to code scanning as SARIF where possible, then through triage.
+
+| Tool | What it catches | Where it runs |
+|---|---|---|
+| Brakeman, bundler-audit, `yarn npm audit` (existing) | Rails code flaws, gem CVEs, npm CVEs | `ci-rails.yml`, already in place; [ISS#50](https://github.com/mpimedia/mpi-application-workflows/issues/50) closes the markaz/sfa gap |
+| CodeQL (existing, Code Security) | Code flaws | GitHub default setup |
+| osv-scanner | A second opinion on lockfiles and images | Pipeline, daily |
+| Trivy, plus Grype/Syft | Image OS and gem packages, secrets and misconfigurations in images; SBOMs | Pipeline, daily, on the deployed image per app |
+| Trivy config (existing in mpi-infrastructure) | Terraform misconfigurations | mpi-infrastructure CI |
+| zizmor and actionlint | Unsafe GitHub Actions workflows: injection, overly broad tokens, unpinned actions. This is the class behind the trivy-action and tj-actions compromises. | CI in every watched repo, and a weekly pipeline sweep |
+| OpenSSF Scorecard | A security score for each repo: pinning, branch protection, token permissions | Pipeline, weekly |
+| Gitleaks or TruffleHog | Secrets in git history, beyond GitHub's push protection | Pipeline, weekly full-history scan |
+| Semgrep (community Ruby/Rails rules) | Code patterns that Brakeman and CodeQL miss | CI |
+| testssl.sh and Mozilla Observatory | TLS and security-header configuration on our live public hostnames. Read-only requests. | Pipeline, weekly |
+| OWASP ZAP baseline | Common web flaws | **Staging only**, weekly. Never production. |
+| Cloudflare Security Center | Attack surface and misconfiguration insights for our zones | Read through the Cloudflare token (part 6) |
+
+The builder picks between overlapping tools (Trivy vs. Grype, Gitleaks vs. TruffleHog) and may phase them in. The categories stay.
 
 ### 2. Inventory and exposure
 
@@ -359,10 +397,10 @@ Each phase ships on its own, as one or more risk-high PRs. The order is **Claude
 | Phase | What ships | Depends on |
 |---|---|---|
 | 0 | Create `mpi-security`; grant App permissions; set up Anthropic federation and the spending cap; add the Cloudflare token's read scopes; create the Postmark inbound address | HC actions |
-| 1 | Inventory, structured feeds, matching, Claude write-ups, routing, issues, email, digest, source health | Phase 0 |
+| 1 | Inventory, structured feeds (including the exploitation signals), matching, Claude write-ups, routing, issues, email, digest, source health, **and a one-time backfill of every existing finding on the org security overview** | Phase 0 |
 | 1b | Cloudflare quick wins: DNSSEC, CAA, TLS settings, via Terraform | Cloudflare read scopes; runs alongside phase 1 |
 | 2 | Inbox and RSS intake with Claude triage | Phase 1, Postmark inbound |
-| 3 | Image scan, droplet `secmon` check, DigitalOcean, status pages, Cert Spotter | Phase 1, Tailscale tag, Cert Spotter key |
+| 3 | Scanners (image scan, osv-scanner, zizmor/actionlint, Scorecard, secrets history, Semgrep, TLS/header checks, ZAP on staging), droplet `secmon` check, DigitalOcean, status pages, Cert Spotter | Phase 1, Tailscale tag, Cert Spotter key |
 | 4 | Express lane: `only:` input, Claude review step, staging auto-deploy, production approval, rollback, timing, drill | Phase 1, ADR-0012 amendment approved |
 | 5 | Rest of the Cloudflare baseline (WAF, rate limits, Access, origin lockdown) and drift monitoring | Phase 1b |
 | 6 | AI hunt | Phase 1 |
@@ -382,7 +420,7 @@ None open as of 2026-10-22.
 
 ## Related
 
-- [ISS#45](https://github.com/mpimedia/mpi-application-workflows/issues/45): triage of the existing code-security backlog.
+- [ISS#45](https://github.com/mpimedia/mpi-application-workflows/issues/45): triage of the existing code-security backlog. Its findings now flow through this epic's phase 1 backfill.
 - In this repo: [ISS#49](https://github.com/mpimedia/mpi-application-workflows/issues/49) (SHA-pin actions), [ISS#50](https://github.com/mpimedia/mpi-application-workflows/issues/50) (yarn audit), [ISS#51](https://github.com/mpimedia/mpi-application-workflows/issues/51) (stale repo names).
 - In mpi-infrastructure: [ISS#63](https://github.com/mpimedia/mpi-infrastructure/issues/63) (databases have no trusted sources), [ISS#64](https://github.com/mpimedia/mpi-infrastructure/issues/64) (SHA-pin actions), [ISS#65](https://github.com/mpimedia/mpi-infrastructure/issues/65) (Docker auto-patching).
 - markaz [ISS#2126](https://github.com/mpimedia/markaz/issues/2126) and sfa [ISS#2273](https://github.com/mpimedia/sfa/issues/2273): Node installed from unpinned node-build.
